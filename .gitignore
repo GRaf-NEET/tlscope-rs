@@ -1,0 +1,35 @@
+# Rust build output
+/target/
+
+# Debug symbols and local binaries
+*.pdb
+*.ilk
+*.exp
+
+# TLScope generated exports and local sessions
+TLScope-export.json
+*.har
+*.session.json
+session.json
+
+# Local debugging CA material created during development
+**/TLScope-ca.pem
+**/TLScope-ca-key.pem
+**/TLScope-created
+/local-ca/
+/.tlscope-ca/
+/ca/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Local environment/editor state
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
