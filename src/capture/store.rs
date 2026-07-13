@@ -4,19 +4,26 @@ use std::time::Duration;
 #[derive(Debug, Default, Clone)]
 pub struct TrafficStore {
     entries: Vec<TrafficEntry>,
+    filter_index: FilterIndex,
 }
 
 impl TrafficStore {
     pub fn push(&mut self, entry: TrafficEntry) {
+        self.filter_index.insert_entry(&entry);
         self.entries.push(entry);
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.filter_index.clear();
     }
 
     pub fn entries(&self) -> &[TrafficEntry] {
         &self.entries
+    }
+
+    pub fn filter_index(&self) -> &FilterIndex {
+        &self.filter_index
     }
 
     pub fn filtered(&self, filter: &TrafficFilter) -> Vec<TrafficEntry> {
@@ -35,6 +42,70 @@ impl TrafficStore {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct FilterIndex {
+    hosts: Vec<String>,
+    statuses: Vec<u16>,
+    content_types: Vec<String>,
+}
+
+impl FilterIndex {
+    pub fn hosts(&self) -> &[String] {
+        &self.hosts
+    }
+
+    pub fn statuses(&self) -> &[u16] {
+        &self.statuses
+    }
+
+    pub fn content_types(&self) -> &[String] {
+        &self.content_types
+    }
+
+    fn insert_entry(&mut self, entry: &TrafficEntry) {
+        insert_sorted_unique(&mut self.hosts, entry.host.to_ascii_lowercase());
+        if let Some(status) = entry.response_status {
+            insert_sorted_unique(&mut self.statuses, status);
+        }
+        insert_content_type(
+            &mut self.content_types,
+            entry.request_body.content_type.as_deref(),
+        );
+        insert_content_type(
+            &mut self.content_types,
+            entry.response_body.content_type.as_deref(),
+        );
+    }
+
+    fn clear(&mut self) {
+        self.hosts.clear();
+        self.statuses.clear();
+        self.content_types.clear();
+    }
+}
+
+fn insert_content_type(values: &mut Vec<String>, content_type: Option<&str>) {
+    let Some(content_type) = content_type else {
+        return;
+    };
+    let value = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    if !value.is_empty() {
+        insert_sorted_unique(values, value);
+    }
+}
+
+fn insert_sorted_unique<T: Ord>(values: &mut Vec<T>, value: T) {
+    match values.binary_search(&value) {
+        Ok(_) => {}
+        Err(index) => values.insert(index, value),
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TrafficFilter {
     conditions: Vec<Condition>,
@@ -48,11 +119,11 @@ impl TrafficFilter {
                 .split_once(':')
                 .ok_or_else(|| format!("invalid filter token '{token}'"))?;
             let condition = match key {
-                "method" => Condition::Method(value.to_ascii_uppercase()),
-                "host" => Condition::Host(value.to_ascii_lowercase()),
-                "path" => Condition::Path(value.to_string()),
+                "method" => Condition::Method(non_empty(value, key)?.to_ascii_uppercase()),
+                "host" => Condition::Host(non_empty(value, key)?.to_ascii_lowercase()),
+                "path" => Condition::Path(non_empty(value, key)?.to_string()),
                 "status" => Condition::Status(parse_comparison_u16(value)?),
-                "type" => Condition::ContentType(value.to_ascii_lowercase()),
+                "type" => Condition::ContentType(non_empty(value, key)?.to_ascii_lowercase()),
                 "has" => match value {
                     "request-body" => Condition::HasRequestBody,
                     "response-body" => Condition::HasResponseBody,
@@ -147,6 +218,14 @@ impl<T: PartialOrd + PartialEq + Copy> Comparison<T> {
     }
 }
 
+fn non_empty<'a>(value: &'a str, key: &str) -> Result<&'a str, String> {
+    if value.is_empty() {
+        Err(format!("empty value for '{key}'"))
+    } else {
+        Ok(value)
+    }
+}
+
 fn parse_bool(value: &str) -> Result<bool, String> {
     match value {
         "true" => Ok(true),
@@ -197,6 +276,8 @@ fn parse_operator(value: &str) -> (Operator, &str) {
         (Operator::Gt, rest)
     } else if let Some(rest) = value.strip_prefix('<') {
         (Operator::Lt, rest)
+    } else if let Some(rest) = value.strip_prefix('=') {
+        (Operator::Eq, rest)
     } else {
         (Operator::Eq, value)
     }
@@ -249,5 +330,22 @@ mod tests {
     #[test]
     fn rejects_unknown_filter() {
         assert!(TrafficFilter::parse("thread:main").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_values_for_free_text_keys() {
+        assert!(TrafficFilter::parse("method:").is_err());
+        assert!(TrafficFilter::parse("host:").is_err());
+        assert!(TrafficFilter::parse("path:").is_err());
+        assert!(TrafficFilter::parse("type:").is_err());
+    }
+
+    #[test]
+    fn indexes_filter_suggestion_values() {
+        let mut store = TrafficStore::default();
+        store.push(entry());
+        assert_eq!(store.filter_index().hosts(), &["api.example.com"]);
+        assert_eq!(store.filter_index().statuses(), &[404]);
+        assert_eq!(store.filter_index().content_types(), &["application/json"]);
     }
 }

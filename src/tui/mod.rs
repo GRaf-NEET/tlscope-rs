@@ -1,13 +1,11 @@
 pub mod events;
+pub mod filter;
 pub mod layout;
 pub mod state;
 pub mod widgets;
 
 use crate::{
-    capture::{
-        redact::RedactionConfig,
-        store::{TrafficFilter, TrafficStore},
-    },
+    capture::{redact::RedactionConfig, store::TrafficStore},
     proxy::server::ProxyEvent,
     tui::{
         events::handle_key,
@@ -84,8 +82,10 @@ async fn run_loop(
             .lock()
             .map(|guard| guard.snapshot())
             .unwrap_or_default();
-        let filter = TrafficFilter::parse(&state.filter).unwrap_or_default();
-        let entries = snapshot.filtered(&filter);
+        if state.entering_filter {
+            crate::tui::filter::refresh(&mut state.filter_editor, snapshot.filter_index());
+        }
+        let entries = snapshot.filtered(&state.applied_filter);
         terminal
             .draw(|frame| draw_ui(frame, &snapshot, &entries, &log_snapshot, state, &runtime))
             .context("failed to draw TUI")?;

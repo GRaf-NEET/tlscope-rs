@@ -63,7 +63,7 @@ fn footer_hint(state: &TuiState) -> &'static str {
         return "1 stop child | 2 leave child | 3/Esc cancel";
     }
     if state.entering_filter {
-        return "type filter | Backspace delete | Enter apply | Esc cancel";
+        return "type | Left/Right move | Up/Down suggest | Tab accept | Enter apply | Esc cancel";
     }
     match state.screen {
         Screen::List => "Up/Down/j/k select | PgUp/PgDn page | Home/End jump | Enter inspect | ? help | q quit",

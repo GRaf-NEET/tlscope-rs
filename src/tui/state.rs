@@ -1,4 +1,6 @@
-use crate::process::logs::ChildLogStore;
+use crate::{
+    capture::store::TrafficFilter, process::logs::ChildLogStore, tui::filter::FilterEditorState,
+};
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
 #[derive(Debug, Clone)]
@@ -78,7 +80,9 @@ pub struct TuiState {
     pub paused: bool,
     pub screen: Screen,
     pub tab: DetailTab,
-    pub filter: String,
+    pub applied_filter_text: String,
+    pub applied_filter: TrafficFilter,
+    pub filter_editor: FilterEditorState,
     pub entering_filter: bool,
     pub message: String,
     pub confirm_quit: bool,
@@ -93,7 +97,9 @@ impl Default for TuiState {
             paused: false,
             screen: Screen::List,
             tab: DetailTab::Overview,
-            filter: String::new(),
+            applied_filter_text: String::new(),
+            applied_filter: TrafficFilter::default(),
+            filter_editor: FilterEditorState::default(),
             entering_filter: false,
             message: String::new(),
             confirm_quit: false,

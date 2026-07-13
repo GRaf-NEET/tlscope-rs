@@ -1,9 +1,13 @@
 use crate::{
     capture::{
-        export::export_session_json, model::TrafficEntry, redact::RedactionConfig,
-        store::TrafficStore,
+        export::export_session_json,
+        model::TrafficEntry,
+        redact::RedactionConfig,
+        store::{FilterIndex, TrafficFilter, TrafficStore},
     },
     tui::{
+        filter,
+        filter::FilterParseState,
         state::{Screen, TuiExit, TuiState},
         widgets::{request_details, response_details},
     },
@@ -27,23 +31,7 @@ pub fn handle_key(
     }
 
     if state.entering_filter {
-        match key.code {
-            KeyCode::Enter => {
-                state.entering_filter = false;
-                state.selected = 0;
-                state.detail_scroll_offset = 0;
-                state.message = "filter applied".to_string();
-            }
-            KeyCode::Esc => {
-                state.entering_filter = false;
-                state.message = "filter editing cancelled".to_string();
-            }
-            KeyCode::Backspace => {
-                state.filter.pop();
-            }
-            KeyCode::Char(c) => state.filter.push(c),
-            _ => unavailable(state, "Filter mode: type text, Backspace, Enter or Esc."),
-        }
+        handle_filter_key(key, state, store)?;
         return Ok(None);
     }
 
@@ -82,6 +70,102 @@ pub fn handle_key(
     }
 }
 
+fn handle_filter_key(
+    key: KeyEvent,
+    state: &mut TuiState,
+    store: &Arc<Mutex<TrafficStore>>,
+) -> Result<()> {
+    let index = filter_index_snapshot(store);
+    filter::refresh(&mut state.filter_editor, &index);
+
+    match key.code {
+        KeyCode::Enter => apply_filter(state),
+        KeyCode::Esc => {
+            state
+                .filter_editor
+                .reset_to(&state.applied_filter_text, &index);
+            state.entering_filter = false;
+            state.message = "filter editing cancelled".to_string();
+        }
+        KeyCode::Backspace => filter::backspace(&mut state.filter_editor, &index),
+        KeyCode::Delete => filter::delete(&mut state.filter_editor, &index),
+        KeyCode::Left => filter::move_left(&mut state.filter_editor),
+        KeyCode::Right => filter::move_right(&mut state.filter_editor),
+        KeyCode::Home => filter::move_home(&mut state.filter_editor),
+        KeyCode::End => filter::move_end(&mut state.filter_editor),
+        KeyCode::Up => filter::select_previous_suggestion(&mut state.filter_editor),
+        KeyCode::Down => filter::select_next_suggestion(&mut state.filter_editor),
+        KeyCode::Tab => {
+            filter::apply_selected_suggestion(&mut state.filter_editor, &index);
+        }
+        KeyCode::BackTab => filter::select_previous_suggestion(&mut state.filter_editor),
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            filter::clear(&mut state.filter_editor, &index)
+        }
+        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            filter::delete_current_token(&mut state.filter_editor, &index)
+        }
+        KeyCode::Char(c) => filter::insert_char(&mut state.filter_editor, &index, c),
+        _ => unavailable(
+            state,
+            "Filter mode: type, arrows, Tab suggestion, Enter apply, Esc cancel.",
+        ),
+    }
+    Ok(())
+}
+
+fn apply_filter(state: &mut TuiState) {
+    match &state.filter_editor.parse_state {
+        FilterParseState::Incomplete => {
+            state.filter_editor.error = Some("incomplete filter token".to_string());
+            state.message = "filter is incomplete".to_string();
+            return;
+        }
+        FilterParseState::Invalid(error) => {
+            state.filter_editor.error = Some(error.clone());
+            state.message = "filter has errors".to_string();
+            return;
+        }
+        FilterParseState::Valid => {}
+    }
+
+    match TrafficFilter::parse(&state.filter_editor.text) {
+        Ok(parsed) => {
+            state.applied_filter_text = state.filter_editor.text.clone();
+            state.applied_filter = parsed;
+            state.entering_filter = false;
+            state.filter_editor.error = None;
+            state.selected = 0;
+            state.detail_scroll_offset = 0;
+            state.message = if state.applied_filter_text.is_empty() {
+                "filter cleared".to_string()
+            } else {
+                "filter applied".to_string()
+            };
+        }
+        Err(error) => {
+            state.filter_editor.error = Some(error);
+            state.message = "filter has errors".to_string();
+        }
+    }
+}
+
+fn begin_filter_edit(state: &mut TuiState, store: &Arc<Mutex<TrafficStore>>) {
+    let index = filter_index_snapshot(store);
+    state
+        .filter_editor
+        .reset_to(&state.applied_filter_text, &index);
+    state.entering_filter = true;
+    state.message = "filter mode".to_string();
+}
+
+fn filter_index_snapshot(store: &Arc<Mutex<TrafficStore>>) -> FilterIndex {
+    store
+        .lock()
+        .map(|guard| guard.filter_index().clone())
+        .unwrap_or_default()
+}
+
 fn handle_list_key(
     key: KeyEvent,
     state: &mut TuiState,
@@ -111,10 +195,7 @@ fn handle_list_key(
             state,
             "Tabs are available only in request details. Press Enter first.",
         ),
-        KeyCode::Char('/') => {
-            state.entering_filter = true;
-            state.message = "filter mode".to_string();
-        }
+        KeyCode::Char('/') => begin_filter_edit(state, store),
         KeyCode::Char(' ') => toggle_pause(state),
         KeyCode::Char('c') => clear_session(state, store),
         KeyCode::Char('e') => export_current_session(state, store, redaction)?,
@@ -163,10 +244,7 @@ fn handle_detail_key(
             state.detail_scroll_offset = 0;
             state.message = format!("tab: {}", state.tab.title());
         }
-        KeyCode::Char('/') => {
-            state.entering_filter = true;
-            state.message = "filter mode".to_string();
-        }
+        KeyCode::Char('/') => begin_filter_edit(state, store),
         KeyCode::Char(' ') => toggle_pause(state),
         KeyCode::Char('c') => clear_session(state, store),
         KeyCode::Char('e') => export_current_session(state, store, redaction)?,
