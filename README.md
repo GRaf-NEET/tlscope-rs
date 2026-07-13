@@ -1,7 +1,7 @@
 # TLScope
 
 ![Rust 2021](https://img.shields.io/badge/Rust-2021-orange)
-![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-lightgrey)
+![Version 0.3.0](https://img.shields.io/badge/version-0.3.0-lightgrey)
 ![License MIT](https://img.shields.io/badge/license-MIT-blue)
 
 Local explicit HTTP/HTTPS debugging proxy for child processes.
