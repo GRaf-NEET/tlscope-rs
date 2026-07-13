@@ -4,6 +4,7 @@ use crate::{
     tui::{
         filter,
         filter::FilterParseState,
+        logs::TlscopeLogSnapshot,
         state::{Screen, TuiRuntime, TuiState},
         widgets::{
             help, process_logs, request_details, request_list, response_details, status_bar,
@@ -23,6 +24,7 @@ pub fn draw_ui(
     store: &TrafficStore,
     entries: &[TrafficEntry],
     logs: &ChildLogSnapshot,
+    tlscope_logs: &TlscopeLogSnapshot,
     state: &TuiState,
     runtime: &TuiRuntime,
 ) {
@@ -43,7 +45,14 @@ pub fn draw_ui(
     match state.screen {
         Screen::List => request_list::render(frame, chunks[2], entries, state.selected),
         Screen::Details => render_details(frame, chunks[2], entries, state),
-        Screen::Logs => process_logs::render(frame, chunks[2], logs, state.log_scroll_offset),
+        Screen::Logs => process_logs::render(
+            frame,
+            chunks[2],
+            logs,
+            tlscope_logs,
+            state.log_tab,
+            state.log_scroll_offset,
+        ),
         Screen::Help => help::render(frame, chunks[2]),
     }
 

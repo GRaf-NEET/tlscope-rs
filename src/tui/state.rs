@@ -1,5 +1,7 @@
 use crate::{
-    capture::store::TrafficFilter, process::logs::ChildLogStore, tui::filter::FilterEditorState,
+    capture::store::TrafficFilter,
+    process::logs::ChildLogStore,
+    tui::{filter::FilterEditorState, logs::TlscopeLogStore},
 };
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
@@ -11,6 +13,7 @@ pub struct TuiRuntime {
     pub https_inspection: bool,
     pub child_running: Option<Arc<AtomicBool>>,
     pub child_logs: Arc<Mutex<ChildLogStore>>,
+    pub tlscope_logs: Arc<Mutex<TlscopeLogStore>>,
     pub auto_exit_when_child_done: bool,
 }
 
@@ -27,6 +30,46 @@ pub enum Screen {
     Details,
     Logs,
     Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogTab {
+    Process,
+    Tlscope,
+}
+
+impl LogTab {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Process => "Process",
+            Self::Tlscope => "TLScope",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Process => "process",
+            Self::Tlscope => "TLScope",
+        }
+    }
+
+    pub fn empty_message(self) -> &'static str {
+        match self {
+            Self::Process => "No process logs captured yet.",
+            Self::Tlscope => "No TLScope logs captured yet.",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Process => Self::Tlscope,
+            Self::Tlscope => Self::Process,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        self.next()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +118,12 @@ impl DetailTab {
 }
 
 #[derive(Debug, Clone)]
+pub struct ClipboardRequest {
+    pub label: &'static str,
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct TuiState {
     pub selected: usize,
     pub paused: bool,
@@ -86,8 +135,10 @@ pub struct TuiState {
     pub entering_filter: bool,
     pub message: String,
     pub confirm_quit: bool,
+    pub log_tab: LogTab,
     pub log_scroll_offset: usize,
     pub detail_scroll_offset: usize,
+    pub clipboard_request: Option<ClipboardRequest>,
 }
 
 impl Default for TuiState {
@@ -103,8 +154,10 @@ impl Default for TuiState {
             entering_filter: false,
             message: String::new(),
             confirm_quit: false,
+            log_tab: LogTab::Process,
             log_scroll_offset: 0,
             detail_scroll_offset: 0,
+            clipboard_request: None,
         }
     }
 }

@@ -14,6 +14,7 @@ use crate::{
     proxy::server::{start_proxy, ProxyServerConfig},
     tui::{
         self,
+        logs::{activate_tlscope_log_capture, push_tlscope_log, TlscopeLogLevel, TlscopeLogStore},
         state::{TuiExit, TuiRuntime},
     },
 };
@@ -33,6 +34,7 @@ use tokio::{
 
 const CHILD_LOG_LIMIT: usize = 2_000;
 const CHILD_LOG_LINE_LIMIT: usize = 4_000;
+const TLSCOPE_LOG_LIMIT: usize = 2_000;
 
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
@@ -51,6 +53,8 @@ async fn run_child(args: crate::cli::RunArgs) -> Result<()> {
     let authority = prepare_authority(&mut app_config, tls_confirmed)?;
     let store = Arc::new(Mutex::new(TrafficStore::default()));
     let child_logs = Arc::new(Mutex::new(ChildLogStore::new(CHILD_LOG_LIMIT)));
+    let tlscope_logs = Arc::new(Mutex::new(TlscopeLogStore::new(TLSCOPE_LOG_LIMIT)));
+    let _tlscope_log_capture = activate_tlscope_log_capture(tlscope_logs.clone());
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let proxy = start_proxy(ProxyServerConfig {
         listen: app_config.listen,
@@ -63,6 +67,12 @@ async fn run_child(args: crate::cli::RunArgs) -> Result<()> {
         upstream_roots: Vec::new(),
     })
     .await?;
+    push_tlscope_log(
+        &tlscope_logs,
+        TlscopeLogLevel::Info,
+        "app",
+        format!("proxy listening on {}", proxy.local_addr),
+    );
 
     let ca_path = authority.as_ref().map(|ca| ca.cert_path().to_path_buf());
     let mut child = spawn_child(LaunchRequest {
@@ -86,6 +96,18 @@ async fn run_child(args: crate::cli::RunArgs) -> Result<()> {
         .first()
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_else(|| "child".to_string());
+    push_tlscope_log(
+        &tlscope_logs,
+        TlscopeLogLevel::Info,
+        "app",
+        format!(
+            "spawned child {} pid {}",
+            child_label,
+            child_pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "N/A".to_string())
+        ),
+    );
 
     let child_running = Arc::new(AtomicBool::new(true));
     let (control_tx, control_rx) = oneshot::channel();
@@ -102,6 +124,7 @@ async fn run_child(args: crate::cli::RunArgs) -> Result<()> {
         https_inspection: app_config.tls_decryption,
         child_running: Some(child_running.clone()),
         child_logs: child_logs.clone(),
+        tlscope_logs: tlscope_logs.clone(),
         auto_exit_when_child_done: true,
     };
 
@@ -139,6 +162,8 @@ async fn run_proxy_only(args: crate::cli::ProxyArgs) -> Result<()> {
     let authority = prepare_authority(&mut app_config, false)?;
     let store = Arc::new(Mutex::new(TrafficStore::default()));
     let child_logs = Arc::new(Mutex::new(ChildLogStore::new(CHILD_LOG_LIMIT)));
+    let tlscope_logs = Arc::new(Mutex::new(TlscopeLogStore::new(TLSCOPE_LOG_LIMIT)));
+    let _tlscope_log_capture = activate_tlscope_log_capture(tlscope_logs.clone());
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let proxy = start_proxy(ProxyServerConfig {
         listen: app_config.listen,
@@ -151,6 +176,12 @@ async fn run_proxy_only(args: crate::cli::ProxyArgs) -> Result<()> {
         upstream_roots: Vec::new(),
     })
     .await?;
+    push_tlscope_log(
+        &tlscope_logs,
+        TlscopeLogLevel::Info,
+        "app",
+        format!("proxy listening on {}", proxy.local_addr),
+    );
     let runtime = TuiRuntime {
         child_label: None,
         child_pid: None,
@@ -158,6 +189,7 @@ async fn run_proxy_only(args: crate::cli::ProxyArgs) -> Result<()> {
         https_inspection: app_config.tls_decryption,
         child_running: None,
         child_logs: child_logs.clone(),
+        tlscope_logs: tlscope_logs.clone(),
         auto_exit_when_child_done: false,
     };
     let _ = tui::run_tui(

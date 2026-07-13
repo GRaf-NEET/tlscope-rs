@@ -103,10 +103,11 @@ pub async fn start_proxy(config: ProxyServerConfig) -> Result<ProxyHandle> {
                     let next_id = next_id.clone();
                     tokio::spawn(async move {
                         if let Err(error) = handle_client(stream, peer, config, id, next_id).await {
+                            let error_chain = format!("{error:#}");
                             if is_benign_client_disconnect(&error) {
-                                debug!(%peer, %error, "proxy client disconnected before request completed");
+                                debug!(%peer, error = %error_chain, "proxy client disconnected before request completed");
                             } else {
-                                warn!(%peer, %error, "proxy client handler failed");
+                                warn!(%peer, error = %error_chain, "proxy client handler failed");
                             }
                         }
                     });
@@ -629,19 +630,26 @@ async fn connect_upstream(
 
 fn is_benign_client_disconnect(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
+        if let Some(io_error) = cause.downcast_ref::<std::io::Error>() {
+            return is_disconnect_io_error(io_error);
+        }
         cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io_error| {
-                matches!(
-                    io_error.kind(),
-                    ErrorKind::ConnectionReset
-                        | ErrorKind::ConnectionAborted
-                        | ErrorKind::BrokenPipe
-                        | ErrorKind::UnexpectedEof
-                )
-            })
+            .downcast_ref::<::h2::Error>()
+            .and_then(|h2_error| h2_error.get_io())
+            .is_some_and(is_disconnect_io_error)
     })
 }
+
+fn is_disconnect_io_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::UnexpectedEof
+    )
+}
+
 fn error_entry(
     id: u64,
     started_at: SystemTime,
@@ -692,4 +700,43 @@ pub(super) fn record_entry(config: &ProxyServerConfig, entry: TrafficEntry) {
         store.push(entry);
     }
     let _ = config.events.send(ProxyEvent::EntryCaptured(id));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Context;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn treats_http2_preface_eof_as_benign_disconnect() {
+        let (server_io, client_io) = tokio::io::duplex(64);
+        drop(client_io);
+
+        let error = ::h2::server::handshake(server_io)
+            .await
+            .context("failed to start HTTP/2 server handshake with child")
+            .unwrap_err();
+
+        assert!(is_benign_client_disconnect(&error));
+    }
+
+    #[tokio::test]
+    async fn treats_invalid_http2_preface_as_protocol_error() {
+        let (server_io, mut client_io) = tokio::io::duplex(64);
+        let client = tokio::spawn(async move {
+            client_io
+                .write_all(b"GET / HTTP/1.1\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let error = ::h2::server::handshake(server_io)
+            .await
+            .context("failed to start HTTP/2 server handshake with child")
+            .unwrap_err();
+
+        client.await.unwrap();
+        assert!(!is_benign_client_disconnect(&error));
+    }
 }

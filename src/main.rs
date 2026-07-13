@@ -1,15 +1,17 @@
 use anyhow::Result;
 use clap::Parser;
-use tlscope::{app, cli::Cli};
+use tlscope::{app, cli::Cli, tui::logs::TlscopeLogLayer};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("tlscope=info")),
-        )
-        .with_writer(std::io::stderr)
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("tlscope=info"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(TlscopeLogLayer)
         .init();
 
     app::run(Cli::parse()).await

@@ -32,7 +32,7 @@ TLScope helps developers inspect traffic from applications they start through th
 
 ## Project Description
 
-TLScope is a local explicit HTTP/HTTPS debugging proxy written in Rust. It can launch a child process with proxy-related environment variables, capture the traffic that process sends through the proxy, and show requests, responses, TLS details, process logs, filters, and exports in a terminal UI.
+TLScope is a local explicit HTTP/HTTPS debugging proxy written in Rust. It can launch a child process with proxy-related environment variables, capture the traffic that process sends through the proxy, and show requests, responses, TLS details, process logs, TLScope logs, filters, and exports in a terminal UI.
 
 The primary workflow is:
 
@@ -53,7 +53,7 @@ TLScope does not transparently intercept all system traffic. A target applicatio
 - HTTP/1.1 WebSocket upgrade tunneling after the `101 Switching Protocols` handshake.
 - Child process launcher that sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and lowercase variants.
 - Optional CA-related environment variables for common clients: `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and `NODE_EXTRA_CA_CERTS`.
-- Terminal UI for live request lists, request details, response details, TLS information, raw previews, process logs, filtering, and JSON export.
+- Terminal UI for live request lists, request details, response details, TLS information, raw previews, process logs, TLScope logs, filtering, and JSON export.
 - Local CA lifecycle commands: create, show path, show fingerprint, install on Windows, and remove local files.
 - Default sensitive header redaction, optional JSON/form body field redaction, and explicit opt-in for showing secrets.
 - Localhost-only integration tests for proxy behavior, HTTPS inspection, process launch, and redaction.
@@ -277,8 +277,8 @@ TUI shortcuts:
 | `Up` / `Down` or `j` / `k` | Select a request or scroll logs. |
 | `Enter` | Open request details. |
 | `Esc` | Return to the previous screen. |
-| `Tab` / `Shift+Tab` | Switch detail tabs. |
-| `l` | Toggle process logs. |
+| `Tab` / `Shift+Tab` | Switch detail tabs; on the logs screen, switch Process/TLScope log pages. |
+| `l` | Toggle the logs screen. |
 | `Home` / `End` | Jump to oldest or latest log lines. |
 | `PgUp` / `PgDn` | Page through logs. |
 | `/` | Enter filter mode. |
@@ -286,7 +286,7 @@ TUI shortcuts:
 | `c` | Clear the current session. |
 | `e` | Export JSON to `TLScope-export.json`. |
 | `r` | Reapply the current filter. |
-| `y` | Show the selected URL in the status line. |
+| `y` | Show the selected URL; on the logs screen, copy the current log page. |
 | `?` | Show help. |
 | `q` | Quit. If a child process is running, choose whether to stop it or leave it running. |
 

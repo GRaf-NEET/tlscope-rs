@@ -1,6 +1,7 @@
 pub mod events;
 pub mod filter;
 pub mod layout;
+pub mod logs;
 pub mod state;
 pub mod widgets;
 
@@ -14,13 +15,14 @@ use crate::{
     },
 };
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use crossterm::{
     event, execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{
-    io,
+    io::{self, Write},
     sync::{atomic::Ordering, Arc, Mutex},
     time::Duration,
 };
@@ -82,12 +84,27 @@ async fn run_loop(
             .lock()
             .map(|guard| guard.snapshot())
             .unwrap_or_default();
+        let tlscope_log_snapshot = runtime
+            .tlscope_logs
+            .lock()
+            .map(|guard| guard.snapshot())
+            .unwrap_or_default();
         if state.entering_filter {
             crate::tui::filter::refresh(&mut state.filter_editor, snapshot.filter_index());
         }
         let entries = snapshot.filtered(&state.applied_filter);
         terminal
-            .draw(|frame| draw_ui(frame, &snapshot, &entries, &log_snapshot, state, &runtime))
+            .draw(|frame| {
+                draw_ui(
+                    frame,
+                    &snapshot,
+                    &entries,
+                    &log_snapshot,
+                    &tlscope_log_snapshot,
+                    state,
+                    &runtime,
+                )
+            })
             .context("failed to draw TUI")?;
 
         if event::poll(Duration::from_millis(100)).context("failed to poll terminal events")? {
@@ -102,12 +119,37 @@ async fn run_loop(
                     state,
                     store,
                     &entries,
-                    log_snapshot.lines.len(),
+                    &log_snapshot,
+                    &tlscope_log_snapshot,
                     &redaction,
                 )? {
                     return Ok(exit);
                 }
+                flush_clipboard_request(terminal, state);
             }
         }
     }
+}
+
+fn flush_clipboard_request(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut TuiState,
+) {
+    let Some(request) = state.clipboard_request.take() else {
+        return;
+    };
+
+    match copy_to_terminal_clipboard(terminal, &request.text) {
+        Ok(()) => state.message = format!("copied {} logs", request.label),
+        Err(error) => state.message = format!("failed to copy {} logs: {error}", request.label),
+    }
+}
+
+fn copy_to_terminal_clipboard(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    text: &str,
+) -> io::Result<()> {
+    let encoded = STANDARD.encode(text.as_bytes());
+    write!(terminal.backend_mut(), "\x1b]52;c;{}\x07", encoded)?;
+    terminal.backend_mut().flush()
 }

@@ -5,10 +5,12 @@ use crate::{
         redact::RedactionConfig,
         store::{FilterIndex, TrafficFilter, TrafficStore},
     },
+    process::logs::ChildLogSnapshot,
     tui::{
         filter,
         filter::FilterParseState,
-        state::{Screen, TuiExit, TuiState},
+        logs::TlscopeLogSnapshot,
+        state::{ClipboardRequest, Screen, TuiExit, TuiState},
         widgets::{request_details, response_details},
     },
 };
@@ -23,7 +25,8 @@ pub fn handle_key(
     state: &mut TuiState,
     store: &Arc<Mutex<TrafficStore>>,
     entries: &[TrafficEntry],
-    log_count: usize,
+    process_logs: &ChildLogSnapshot,
+    tlscope_logs: &TlscopeLogSnapshot,
     redaction: &RedactionConfig,
 ) -> Result<Option<TuiExit>> {
     if state.confirm_quit {
@@ -52,7 +55,7 @@ pub fn handle_key(
             } else {
                 state.screen = Screen::Logs;
                 state.log_scroll_offset = 0;
-                state.message = "process logs".to_string();
+                state.message = format!("{} logs", state.log_tab.label());
             }
             return Ok(None);
         }
@@ -60,7 +63,7 @@ pub fn handle_key(
     }
 
     match state.screen {
-        Screen::Logs => handle_log_key(key, state, store, log_count, redaction),
+        Screen::Logs => handle_log_key(key, state, store, process_logs, tlscope_logs, redaction),
         Screen::Details => handle_detail_key(key, state, store, entries, redaction),
         Screen::Help => {
             handle_help_key(key, state);
@@ -272,9 +275,11 @@ fn handle_log_key(
     key: KeyEvent,
     state: &mut TuiState,
     store: &Arc<Mutex<TrafficStore>>,
-    log_count: usize,
+    process_logs: &ChildLogSnapshot,
+    tlscope_logs: &TlscopeLogSnapshot,
     redaction: &RedactionConfig,
 ) -> Result<Option<TuiExit>> {
+    let log_count = current_log_count(state, process_logs, tlscope_logs);
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => scroll_logs_older(state, log_count, 1),
         KeyCode::Down | KeyCode::Char('j') => scroll_logs_newer(state, 1),
@@ -282,16 +287,19 @@ fn handle_log_key(
         KeyCode::PageDown => scroll_logs_newer(state, 10),
         KeyCode::Home => {
             if log_count == 0 {
-                unavailable(state, "No process logs captured yet.");
+                unavailable(state, state.log_tab.empty_message());
             } else {
                 state.log_scroll_offset = log_count.saturating_sub(1);
-                state.message = "oldest logs".to_string();
+                state.message = format!("oldest {} logs", state.log_tab.label());
             }
         }
         KeyCode::End => {
             state.log_scroll_offset = 0;
-            state.message = "following logs".to_string();
+            state.message = format!("following {} logs", state.log_tab.label());
         }
+        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => switch_log_tab(state, true),
+        KeyCode::Tab => switch_log_tab(state, false),
+        KeyCode::BackTab => switch_log_tab(state, true),
         KeyCode::Esc => {
             state.screen = Screen::List;
             state.message.clear();
@@ -299,9 +307,10 @@ fn handle_log_key(
         KeyCode::Char(' ') => toggle_pause(state),
         KeyCode::Char('c') => clear_session(state, store),
         KeyCode::Char('e') => export_current_session(state, store, redaction)?,
+        KeyCode::Char('y') => copy_current_logs(state, process_logs, tlscope_logs),
         _ => unavailable(
             state,
-            "Log mode: Up/Down scroll, Home/End jump, Esc or l back.",
+            "Log mode: Up/Down scroll, Tab page, y copy logs, Esc or l back.",
         ),
     }
     Ok(None)
@@ -418,9 +427,49 @@ fn selected_entry<'a>(state: &TuiState, entries: &'a [TrafficEntry]) -> Option<&
     entries.get(state.selected.min(entries.len().saturating_sub(1)))
 }
 
+fn current_log_count(
+    state: &TuiState,
+    process_logs: &ChildLogSnapshot,
+    tlscope_logs: &TlscopeLogSnapshot,
+) -> usize {
+    match state.log_tab {
+        crate::tui::state::LogTab::Process => process_logs.lines.len(),
+        crate::tui::state::LogTab::Tlscope => tlscope_logs.lines.len(),
+    }
+}
+
+fn switch_log_tab(state: &mut TuiState, previous: bool) {
+    state.log_tab = if previous {
+        state.log_tab.previous()
+    } else {
+        state.log_tab.next()
+    };
+    state.log_scroll_offset = 0;
+    state.message = format!("{} logs", state.log_tab.label());
+}
+
+fn copy_current_logs(
+    state: &mut TuiState,
+    process_logs: &ChildLogSnapshot,
+    tlscope_logs: &TlscopeLogSnapshot,
+) {
+    let text = match state.log_tab {
+        crate::tui::state::LogTab::Process => process_logs.clipboard_text(),
+        crate::tui::state::LogTab::Tlscope => tlscope_logs.clipboard_text(),
+    };
+
+    if text.is_empty() {
+        unavailable(state, state.log_tab.empty_message());
+    } else {
+        state.clipboard_request = Some(ClipboardRequest {
+            label: state.log_tab.label(),
+            text,
+        });
+    }
+}
 fn scroll_logs_older(state: &mut TuiState, log_count: usize, amount: usize) {
     if log_count == 0 {
-        unavailable(state, "No process logs captured yet.");
+        unavailable(state, state.log_tab.empty_message());
         return;
     }
     let max_offset = log_count.saturating_sub(1);
@@ -431,19 +480,19 @@ fn scroll_logs_older(state: &mut TuiState, log_count: usize, amount: usize) {
             .log_scroll_offset
             .saturating_add(amount)
             .min(max_offset);
-        state.message = "older logs".to_string();
+        state.message = format!("older {} logs", state.log_tab.label());
     }
 }
 
 fn scroll_logs_newer(state: &mut TuiState, amount: usize) {
     if state.log_scroll_offset == 0 {
-        unavailable(state, "Already following the latest logs.");
+        unavailable(state, "Already following the latest log line.");
     } else {
         state.log_scroll_offset = state.log_scroll_offset.saturating_sub(amount);
         state.message = if state.log_scroll_offset == 0 {
-            "following logs".to_string()
+            format!("following {} logs", state.log_tab.label())
         } else {
-            "newer logs".to_string()
+            format!("newer {} logs", state.log_tab.label())
         };
     }
 }

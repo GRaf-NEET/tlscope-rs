@@ -38,6 +38,26 @@ impl Default for ChildLogSnapshot {
     }
 }
 
+impl ChildLogSnapshot {
+    pub fn clipboard_text(&self) -> String {
+        let mut text = String::new();
+        if self.dropped > 0 {
+            text.push_str(&format!(
+                "[{} older process log lines dropped]\n",
+                self.dropped
+            ));
+        }
+
+        for (index, line) in self.lines.iter().enumerate() {
+            if index > 0 {
+                text.push('\n');
+            }
+            text.push_str(&format!("[{}] {}", line.stream.label(), line.text));
+        }
+        text
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChildLogStore {
     lines: VecDeque<ChildOutputLine>,
@@ -154,5 +174,17 @@ mod tests {
         assert_eq!(snapshot.lines.len(), 2);
         assert_eq!(snapshot.lines[0].text, "two");
         assert_eq!(snapshot.lines[1].text, "three");
+    }
+
+    #[test]
+    fn formats_snapshot_for_clipboard() {
+        let mut store = ChildLogStore::new(1);
+        store.push(ChildOutputStream::Stdout, "first");
+        store.push(ChildOutputStream::Stderr, "second");
+
+        assert_eq!(
+            store.snapshot().clipboard_text(),
+            "[1 older process log lines dropped]\n[stderr] second"
+        );
     }
 }
