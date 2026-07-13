@@ -1,14 +1,8 @@
 # Contributing
 
-## Local Checks
+This file is a language selector for contribution guidelines.
 
-```powershell
-cargo fmt --all -- --check
-cargo test --locked
-```
-
-For changes that touch proxy behavior, add or update integration tests under `tests/`.
-
-## Safety Notes
-
-Do not commit generated CA private keys, captured session exports, logs with tokens, or local environment files. The repository `.gitignore` excludes common TLScope outputs, but review staged files before committing.
+| Language | Document |
+| --- | --- |
+| English | [docs/locales/en-US/CONTRIBUTING.md](docs/locales/en-US/CONTRIBUTING.md) |
+| Русский | [docs/locales/ru-RU/CONTRIBUTING.md](docs/locales/ru-RU/CONTRIBUTING.md) |
