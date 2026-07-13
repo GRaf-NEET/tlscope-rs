@@ -66,8 +66,8 @@ fn footer_hint(state: &TuiState) -> &'static str {
         return "type filter | Backspace delete | Enter apply | Esc cancel";
     }
     match state.screen {
-        Screen::List => "Up/Down/j/k select | Enter inspect | l logs | / filter | Space pause | c clear | e export | ? help | q quit",
-        Screen::Details => "Tab next | Shift+Tab prev | Esc list | l logs | y URL | e export | ? help | q quit",
+        Screen::List => "Up/Down/j/k select | PgUp/PgDn page | Home/End jump | Enter inspect | ? help | q quit",
+        Screen::Details => "Up/Down scroll | PgUp/PgDn page | Home/End jump | Tab switch | Esc list | ? help | q quit",
         Screen::Logs => "Up/Down/j/k scroll | PgUp/PgDn page | Home/End jump | Esc/l list | ? help | q quit",
         Screen::Help => "Esc back | l logs | ? help | q quit",
     }

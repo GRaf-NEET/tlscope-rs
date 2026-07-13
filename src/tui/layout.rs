@@ -110,19 +110,23 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, entries: &[TrafficEntry], s
 
     match state.tab {
         crate::tui::state::DetailTab::Overview => {
-            request_details::render_overview(frame, chunks[1], entry)
+            request_details::render_overview(frame, chunks[1], entry, state.detail_scroll_offset)
         }
         crate::tui::state::DetailTab::Request => {
-            request_details::render_request(frame, chunks[1], entry)
+            request_details::render_request(frame, chunks[1], entry, state.detail_scroll_offset)
         }
         crate::tui::state::DetailTab::Response => {
-            response_details::render_response(frame, chunks[1], entry)
+            response_details::render_response(frame, chunks[1], entry, state.detail_scroll_offset)
         }
-        crate::tui::state::DetailTab::Tls => response_details::render_tls(frame, chunks[1], entry),
+        crate::tui::state::DetailTab::Tls => {
+            response_details::render_tls(frame, chunks[1], entry, state.detail_scroll_offset)
+        }
         crate::tui::state::DetailTab::Timing => {
-            response_details::render_timing(frame, chunks[1], entry)
+            response_details::render_timing(frame, chunks[1], entry, state.detail_scroll_offset)
         }
-        crate::tui::state::DetailTab::Raw => response_details::render_raw(frame, chunks[1], entry),
+        crate::tui::state::DetailTab::Raw => {
+            response_details::render_raw(frame, chunks[1], entry, state.detail_scroll_offset)
+        }
     }
 }
 

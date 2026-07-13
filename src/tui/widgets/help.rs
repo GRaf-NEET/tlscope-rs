@@ -7,7 +7,8 @@ use ratatui::{
 
 pub fn render(frame: &mut Frame<'_>, area: Rect) {
     let lines = vec![
-        Line::from("Up/Down or j/k: select request / scroll logs"),
+        Line::from("List: Up/Down or j/k select request, PgUp/PgDn page, Home/End jump"),
+        Line::from("Details: Up/Down or j/k scroll, PgUp/PgDn page, Home/End jump"),
         Line::from("Enter: details    Esc: back    Tab / Shift+Tab: switch detail tab"),
         Line::from("l: process logs    Home/End: oldest/latest log    PgUp/PgDn: page logs"),
         Line::from("/: filter    Space: pause/live    c: clear    e: export JSON"),

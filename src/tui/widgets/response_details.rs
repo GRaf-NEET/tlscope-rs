@@ -1,14 +1,19 @@
 use crate::{
     capture::model::TrafficEntry,
-    tui::widgets::request_details::{body_preview, header, hex_preview},
+    tui::widgets::request_details::{body_preview, header, hex_preview, render_panel},
 };
-use ratatui::{
-    layout::Rect,
-    widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
-};
+use ratatui::{layout::Rect, Frame};
 
-pub fn render_response(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry) {
+pub fn render_response(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    entry: &TrafficEntry,
+    scroll_offset: usize,
+) {
+    render_panel(frame, area, "Response", response_text(entry), scroll_offset);
+}
+
+pub fn response_text(entry: &TrafficEntry) -> String {
     let mut text = String::new();
     text.push_str(&format!("Status: {}\n\n", entry.status_label()));
     text.push_str("Headers:\n");
@@ -21,11 +26,15 @@ pub fn render_response(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry) 
     );
     text.push_str("\n\nBody:\n");
     text.push_str(&body_preview(&entry.response_body));
-    frame.render_widget(panel("Response", text), area);
+    text
 }
 
-pub fn render_tls(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry) {
-    let text = if let Some(tls) = &entry.tls {
+pub fn render_tls(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry, scroll_offset: usize) {
+    render_panel(frame, area, "TLS", tls_text(entry), scroll_offset);
+}
+
+pub fn tls_text(entry: &TrafficEntry) -> String {
+    if let Some(tls) = &entry.tls {
         let cert = tls.certificate.as_ref();
         format!(
             "Host: {}\nTLS: {}\nALPN: {}\nSubject: {}\nIssuer: {}\nSAN: {}\nValid from: {}\nValid until: {}\nSHA-256: {}\nVerification: {}\n\n{}",
@@ -43,19 +52,30 @@ pub fn render_tls(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry) {
         )
     } else {
         "No decrypted TLS information. CONNECT may be tunneled or this was plain HTTP.".to_string()
-    };
-    frame.render_widget(panel("TLS", text), area);
+    }
 }
 
-pub fn render_timing(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry) {
-    let text = format!(
+pub fn render_timing(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    entry: &TrafficEntry,
+    scroll_offset: usize,
+) {
+    render_panel(frame, area, "Timing", timing_text(entry), scroll_offset);
+}
+
+pub fn timing_text(entry: &TrafficEntry) -> String {
+    format!(
         "Local proxy connection: N/A\nDNS: N/A\nTCP connect: N/A\nTLS handshake: N/A\nRequest send: N/A\nFirst byte wait: N/A\nResponse download: N/A\nTotal: {}ms",
         entry.duration.as_millis()
-    );
-    frame.render_widget(panel("Timing", text), area);
+    )
 }
 
-pub fn render_raw(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry) {
+pub fn render_raw(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry, scroll_offset: usize) {
+    render_panel(frame, area, "Raw", raw_text(entry), scroll_offset);
+}
+
+pub fn raw_text(entry: &TrafficEntry) -> String {
     let mut text = String::new();
     text.push_str(&format!(
         "{} {} {}\n",
@@ -81,11 +101,5 @@ pub fn render_raw(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry) {
     } else {
         text.push_str(&hex_preview(&entry.response_body.bytes));
     }
-    frame.render_widget(panel("Raw", text), area);
-}
-
-fn panel(title: &'static str, text: String) -> Paragraph<'static> {
-    Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false })
+    text
 }

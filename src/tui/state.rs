@@ -83,6 +83,7 @@ pub struct TuiState {
     pub message: String,
     pub confirm_quit: bool,
     pub log_scroll_offset: usize,
+    pub detail_scroll_offset: usize,
 }
 
 impl Default for TuiState {
@@ -97,6 +98,7 @@ impl Default for TuiState {
             message: String::new(),
             confirm_quit: false,
             log_scroll_offset: 0,
+            detail_scroll_offset: 0,
         }
     }
 }

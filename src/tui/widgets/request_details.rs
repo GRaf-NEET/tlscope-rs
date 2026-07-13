@@ -10,11 +10,20 @@ use ratatui::{
 };
 use url::Url;
 
-pub fn render_overview(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry) {
+pub fn render_overview(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    entry: &TrafficEntry,
+    scroll_offset: usize,
+) {
+    render_panel(frame, area, "Overview", overview_text(entry), scroll_offset);
+}
+
+pub fn overview_text(entry: &TrafficEntry) -> String {
     let content_type = header(entry.response_headers.as_slice(), "content-type")
         .or_else(|| header(entry.request_headers.as_slice(), "content-type"))
         .unwrap_or_else(|| "N/A".to_string());
-    let text = [
+    [
         format!("URL: {}", entry.url()),
         format!("Method: {}", entry.method),
         format!("Status: {}", entry.status_label()),
@@ -37,11 +46,19 @@ pub fn render_overview(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry) 
             entry.error.clone().unwrap_or_else(|| "N/A".to_string())
         ),
     ]
-    .join("\n");
-    frame.render_widget(panel("Overview", text), area);
+    .join("\n")
 }
 
-pub fn render_request(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry) {
+pub fn render_request(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    entry: &TrafficEntry,
+    scroll_offset: usize,
+) {
+    render_panel(frame, area, "Request", request_text(entry), scroll_offset);
+}
+
+pub fn request_text(entry: &TrafficEntry) -> String {
     let mut text = String::new();
     text.push_str("Headers:\n");
     for (name, value) in &entry.request_headers {
@@ -53,7 +70,7 @@ pub fn render_request(frame: &mut Frame<'_>, area: Rect, entry: &TrafficEntry) {
     text.push_str(&header(&entry.request_headers, "cookie").unwrap_or_else(|| "N/A".to_string()));
     text.push_str("\n\nBody:\n");
     text.push_str(&body_preview(&entry.request_body));
-    frame.render_widget(panel("Request", text), area);
+    text
 }
 
 pub fn body_preview(body: &CapturedBody) -> String {
@@ -96,6 +113,7 @@ pub fn body_preview(body: &CapturedBody) -> String {
     }
     out
 }
+
 fn query_params(entry: &TrafficEntry) -> String {
     let url = entry.url();
     match Url::parse(&url) {
@@ -137,8 +155,43 @@ pub fn hex_preview(bytes: &[u8]) -> String {
         .collect::<String>()
 }
 
-fn panel(title: &'static str, text: String) -> Paragraph<'static> {
+pub fn render_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &'static str,
+    text: String,
+    scroll_offset: usize,
+) {
+    let paragraph = panel(title, text, area, scroll_offset);
+    frame.render_widget(paragraph, area);
+}
+
+fn panel(
+    title: &'static str,
+    text: String,
+    area: Rect,
+    scroll_offset: usize,
+) -> Paragraph<'static> {
+    let max_scroll = max_scroll_offset(&text, area);
+    let scroll = scroll_offset.min(max_scroll).min(u16::MAX as usize) as u16;
     Paragraph::new(text)
         .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
+        .scroll((scroll, 0))
+}
+
+pub fn max_scroll_offset(text: &str, area: Rect) -> usize {
+    let inner_width = area.width.saturating_sub(2).max(1) as usize;
+    let inner_height = area.height.saturating_sub(2).max(1) as usize;
+    let visual_lines = text
+        .lines()
+        .map(|line| wrapped_line_count(line, inner_width))
+        .sum::<usize>()
+        .max(1);
+    visual_lines.saturating_sub(inner_height)
+}
+
+fn wrapped_line_count(line: &str, width: usize) -> usize {
+    let len = line.chars().count().max(1);
+    len.div_ceil(width)
 }
