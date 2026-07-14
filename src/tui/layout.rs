@@ -1,10 +1,9 @@
 use crate::{
-    capture::{model::TrafficEntry, store::TrafficStore},
+    capture::{filter_suggestions::FilterParseState, model::TrafficEntry, store::TrafficStore},
+    diagnostics::logs::TlscopeLogSnapshot,
     process::logs::ChildLogSnapshot,
     tui::{
         filter,
-        filter::FilterParseState,
-        logs::TlscopeLogSnapshot,
         state::{Screen, TuiRuntime, TuiState},
         widgets::{
             help, process_logs, request_details, request_list, response_details, status_bar,

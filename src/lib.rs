@@ -3,6 +3,7 @@ pub mod capture;
 pub mod certificates;
 pub mod cli;
 pub mod config;
+pub mod diagnostics;
 pub mod interactive;
 pub mod process;
 pub mod proxy;

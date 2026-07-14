@@ -1,9 +1,7 @@
 use crate::{
+    diagnostics::logs::{TlscopeLogLevel, TlscopeLogSnapshot},
     process::logs::{ChildLogSnapshot, ChildOutputStream},
-    tui::{
-        logs::{TlscopeLogLevel, TlscopeLogSnapshot},
-        state::LogTab,
-    },
+    tui::state::LogTab,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},

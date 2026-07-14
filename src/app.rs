@@ -6,15 +6,18 @@ use crate::{
     },
     cli::{CaCommand, Cli, Commands},
     config::{AppConfig, ChildConfig},
+    diagnostics::logs::{
+        activate_tlscope_log_capture, push_tlscope_log, TlscopeLogLevel, TlscopeLogStore,
+    },
     interactive,
     process::{
         launcher::{spawn_child, ChildExit, ChildStdio, LaunchRequest},
         logs::{sanitize_output_line, ChildLogStore, ChildOutputStream},
+        tracking::{ProcessTracker, ProcessTrackingConfig},
     },
     proxy::server::{start_proxy, ProxyServerConfig},
     tui::{
         self,
-        logs::{activate_tlscope_log_capture, push_tlscope_log, TlscopeLogLevel, TlscopeLogStore},
         state::{TuiExit, TuiRuntime},
     },
 };
@@ -49,7 +52,10 @@ async fn run_child(args: crate::cli::RunArgs) -> Result<()> {
     let mut app_config = AppConfig::from_common(&args.common)?;
     let tls_confirmed = args.tls_confirmed;
     let mut child_config = ChildConfig::from_run(&args)?;
-    child_config.command = interactive::resolve_command_target(child_config.command)?;
+    let resolved =
+        interactive::resolve_command_target(child_config.command, child_config.process_tracking)?;
+    child_config.command = resolved.command;
+    child_config.process_tracking = resolved.process_tracking;
     let authority = prepare_authority(&mut app_config, tls_confirmed)?;
     let store = Arc::new(Mutex::new(TrafficStore::default()));
     let child_logs = Arc::new(Mutex::new(ChildLogStore::new(CHILD_LOG_LIMIT)));
@@ -59,6 +65,7 @@ async fn run_child(args: crate::cli::RunArgs) -> Result<()> {
     let proxy = start_proxy(ProxyServerConfig {
         listen: app_config.listen,
         tls_decryption: app_config.tls_decryption,
+        only_http1: app_config.only_http1,
         authority: authority.clone(),
         max_body_size: app_config.max_body_size,
         store: store.clone(),
@@ -75,6 +82,8 @@ async fn run_child(args: crate::cli::RunArgs) -> Result<()> {
     );
 
     let ca_path = authority.as_ref().map(|ca| ca.cert_path().to_path_buf());
+    let mut process_tracker =
+        prepare_process_tracker(child_config.process_tracking.clone(), &tlscope_logs).await;
     let mut child = spawn_child(LaunchRequest {
         command: child_config.command.clone(),
         workdir: child_config.workdir,
@@ -85,6 +94,7 @@ async fn run_child(args: crate::cli::RunArgs) -> Result<()> {
         stdio: ChildStdio::Piped,
     })?;
     let child_pid = child.pid();
+    process_tracker.set_child_pid(child_pid);
     if let Some(stdout) = child.take_stdout() {
         spawn_child_output_reader(stdout, ChildOutputStream::Stdout, child_logs.clone());
     }
@@ -92,6 +102,17 @@ async fn run_child(args: crate::cli::RunArgs) -> Result<()> {
         spawn_child_output_reader(stderr, ChildOutputStream::Stderr, child_logs.clone());
     }
     let child_label = child_config
+        .process_tracking
+        .label()
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            child_config
+                .command
+                .first()
+                .map(|value| value.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "child".to_string());
+    let launched_command_label = child_config
         .command
         .first()
         .map(|value| value.to_string_lossy().into_owned())
@@ -102,7 +123,7 @@ async fn run_child(args: crate::cli::RunArgs) -> Result<()> {
         "app",
         format!(
             "spawned child {} pid {}",
-            child_label,
+            launched_command_label,
             child_pid
                 .map(|pid| pid.to_string())
                 .unwrap_or_else(|| "N/A".to_string())
@@ -112,10 +133,17 @@ async fn run_child(args: crate::cli::RunArgs) -> Result<()> {
     let child_running = Arc::new(AtomicBool::new(true));
     let (control_tx, control_rx) = oneshot::channel();
     let supervisor_running = child_running.clone();
-    let supervisor =
-        tokio::spawn(
-            async move { child_supervisor(&mut child, supervisor_running, control_rx).await },
-        );
+    let supervisor_tlscope_logs = tlscope_logs.clone();
+    let supervisor = tokio::spawn(async move {
+        child_supervisor(
+            &mut child,
+            process_tracker,
+            supervisor_running,
+            control_rx,
+            supervisor_tlscope_logs,
+        )
+        .await
+    });
 
     let runtime = TuiRuntime {
         child_label: Some(child_label),
@@ -168,6 +196,7 @@ async fn run_proxy_only(args: crate::cli::ProxyArgs) -> Result<()> {
     let proxy = start_proxy(ProxyServerConfig {
         listen: app_config.listen,
         tls_decryption: app_config.tls_decryption,
+        only_http1: app_config.only_http1,
         authority,
         max_body_size: app_config.max_body_size,
         store: store.clone(),
@@ -367,6 +396,25 @@ fn push_child_log(
         guard.push(stream, line);
     }
 }
+
+async fn prepare_process_tracker(
+    config: ProcessTrackingConfig,
+    tlscope_logs: &Arc<Mutex<TlscopeLogStore>>,
+) -> ProcessTracker {
+    match ProcessTracker::prepare(config.clone()).await {
+        Ok(tracker) => tracker,
+        Err(error) => {
+            push_tlscope_log(
+                tlscope_logs,
+                TlscopeLogLevel::Warn,
+                "process",
+                format!("cannot capture process baseline; lifecycle tracking is degraded: {error}"),
+            );
+            ProcessTracker::without_baseline(config)
+        }
+    }
+}
+
 fn report_child_exit(exit: &ChildExit) {
     if exit.success {
         eprintln!(
@@ -388,8 +436,10 @@ enum ChildControl {
 
 async fn child_supervisor(
     child: &mut crate::process::launcher::ChildHandle,
+    mut tracker: ProcessTracker,
     running: Arc<AtomicBool>,
     control_rx: oneshot::Receiver<ChildControl>,
+    tlscope_logs: Arc<Mutex<TlscopeLogStore>>,
 ) -> Result<Option<ChildExit>> {
     tokio::pin!(control_rx);
     let result = tokio::select! {
@@ -401,6 +451,72 @@ async fn child_supervisor(
             }
         }
     };
+    if let Some(exit) = &result {
+        let status = if exit.success {
+            "successfully"
+        } else {
+            "with non-zero status"
+        };
+        push_tlscope_log(
+            &tlscope_logs,
+            TlscopeLogLevel::Info,
+            "process",
+            format!(
+                "child process {:?} exited {status}; watching for app restarts for up to {}s of quiet",
+                exit.pid,
+                tracker.config().exit_settle().as_secs()
+            ),
+        );
+        let wait_result = tokio::select! {
+            summary = tracker.wait_for_quiet_after_exit() => {
+                match summary {
+                    Ok(summary) => Some(summary),
+                    Err(error) => {
+                        push_tlscope_log(
+                            &tlscope_logs,
+                            TlscopeLogLevel::Warn,
+                            "process",
+                            format!("lifecycle tracking stopped after process query failed: {error}"),
+                        );
+                        None
+                    }
+                }
+            }
+            control = &mut control_rx => {
+                match control {
+                    Ok(ChildControl::Terminate(_)) => {
+                        push_tlscope_log(
+                            &tlscope_logs,
+                            TlscopeLogLevel::Info,
+                            "process",
+                            "lifecycle tracking stopped by terminate request after child exit".to_string(),
+                        );
+                    }
+                    Ok(ChildControl::Detach) | Err(_) => {
+                        push_tlscope_log(
+                            &tlscope_logs,
+                            TlscopeLogLevel::Info,
+                            "process",
+                            "lifecycle tracking detached after child exit".to_string(),
+                        );
+                    }
+                }
+                None
+            }
+        };
+        if let Some(summary) = wait_result {
+            push_tlscope_log(
+                &tlscope_logs,
+                TlscopeLogLevel::Info,
+                "process",
+                format!(
+                    "app lifecycle quiet for {}s after observing {} tracked process(es)",
+                    summary.quiet_for.as_secs(),
+                    summary.observed_process_count
+                ),
+            );
+        }
+    }
     running.store(false, Ordering::SeqCst);
     Ok(result)
 }

@@ -1,17 +1,17 @@
 use crate::{
     capture::{
+        details,
         export::export_session_json,
+        filter_suggestions::FilterParseState,
         model::TrafficEntry,
         redact::RedactionConfig,
         store::{FilterIndex, TrafficFilter, TrafficStore},
     },
+    diagnostics::logs::TlscopeLogSnapshot,
     process::logs::ChildLogSnapshot,
     tui::{
         filter,
-        filter::FilterParseState,
-        logs::TlscopeLogSnapshot,
         state::{ClipboardRequest, Screen, TuiExit, TuiState},
-        widgets::{request_details, response_details},
     },
 };
 use anyhow::{Context, Result};
@@ -401,12 +401,12 @@ fn detail_scroll_limit(state: &TuiState, entries: &[TrafficEntry]) -> usize {
         return 0;
     };
     let text = match state.tab {
-        crate::tui::state::DetailTab::Overview => request_details::overview_text(entry),
-        crate::tui::state::DetailTab::Request => request_details::request_text(entry),
-        crate::tui::state::DetailTab::Response => response_details::response_text(entry),
-        crate::tui::state::DetailTab::Tls => response_details::tls_text(entry),
-        crate::tui::state::DetailTab::Timing => response_details::timing_text(entry),
-        crate::tui::state::DetailTab::Raw => response_details::raw_text(entry),
+        crate::tui::state::DetailTab::Overview => details::overview_text(entry),
+        crate::tui::state::DetailTab::Request => details::request_text(entry),
+        crate::tui::state::DetailTab::Response => details::response_text(entry),
+        crate::tui::state::DetailTab::Tls => details::tls_text(entry),
+        crate::tui::state::DetailTab::Timing => details::timing_text(entry),
+        crate::tui::state::DetailTab::Raw => details::raw_text(entry),
     };
     estimated_visual_lines(&text).saturating_sub(1)
 }

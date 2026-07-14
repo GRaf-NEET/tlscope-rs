@@ -21,6 +21,7 @@ session.json
 /ca/
 
 # Logs and temporary files
+.tmp/
 *.log
 *.tmp
 *.temp

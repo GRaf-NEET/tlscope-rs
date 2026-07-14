@@ -1,7 +1,6 @@
 pub mod events;
 pub mod filter;
 pub mod layout;
-pub mod logs;
 pub mod state;
 pub mod widgets;
 

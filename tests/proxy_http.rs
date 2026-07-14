@@ -19,6 +19,7 @@ async fn proxies_plain_http_and_captures_entry() {
     let proxy = start_proxy(ProxyServerConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         tls_decryption: false,
+        only_http1: false,
         authority: None,
         max_body_size: 1024,
         store: store.clone(),
@@ -57,6 +58,7 @@ async fn truncates_captured_response_body_without_truncating_proxy_response() {
     let proxy = start_proxy(ProxyServerConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         tls_decryption: false,
+        only_http1: false,
         authority: None,
         max_body_size: 4,
         store: store.clone(),
@@ -94,6 +96,7 @@ async fn tunnels_plain_websocket_upgrade_and_captures_handshake() {
     let proxy = start_proxy(ProxyServerConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         tls_decryption: false,
+        only_http1: false,
         authority: None,
         max_body_size: 1024,
         store: store.clone(),

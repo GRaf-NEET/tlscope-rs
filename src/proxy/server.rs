@@ -51,6 +51,7 @@ pub enum ProxyEvent {
 pub struct ProxyServerConfig {
     pub listen: SocketAddr,
     pub tls_decryption: bool,
+    pub only_http1: bool,
     pub authority: Option<Arc<LocalAuthority>>,
     pub max_body_size: usize,
     pub store: Arc<Mutex<TrafficStore>>,
@@ -231,7 +232,7 @@ async fn handle_connect(
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await
         .context("failed to acknowledge CONNECT")?;
-    let mut client_tls = match tls::accept_client_tls(client, leaf).await {
+    let mut client_tls = match tls::accept_client_tls(client, leaf, config.only_http1).await {
         Ok(stream) => stream,
         Err(error) => {
             let entry = connect_entry(
@@ -249,7 +250,7 @@ async fn handle_connect(
         }
     };
 
-    if tls::negotiated_server_alpn(&client_tls).as_deref() == Some("h2") {
+    if !config.only_http1 && tls::negotiated_server_alpn(&client_tls).as_deref() == Some("h2") {
         handle_h2_connection(client_tls, target, config, next_id).await?;
         return Ok(());
     }

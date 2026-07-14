@@ -1,3 +1,4 @@
+use crate::process::tracking::ProcessTrackingConfig;
 use clap::{Args, Parser, Subcommand};
 use std::{ffi::OsString, net::SocketAddr, path::PathBuf};
 
@@ -33,6 +34,10 @@ pub struct CommonProxyArgs {
     /// Do not decrypt HTTPS CONNECT streams; tunnel them only.
     #[arg(long)]
     pub no_tls_decryption: bool,
+
+    /// Force inspected HTTPS connections to HTTP/1.1 by not negotiating HTTP/2 with child clients.
+    #[arg(long)]
+    pub only_http1: bool,
 
     /// Directory where the local debugging CA is stored.
     #[arg(long)]
@@ -82,6 +87,9 @@ pub struct RunArgs {
     /// Program and arguments after '--'.
     #[arg(required = true, last = true)]
     pub command: Vec<OsString>,
+
+    #[arg(skip)]
+    pub process_tracking: ProcessTrackingConfig,
 }
 
 #[derive(Debug, Args, Clone)]

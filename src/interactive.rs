@@ -5,6 +5,7 @@ use crate::{
     },
     cli::{CommonProxyArgs, RunArgs},
     config::default_ca_dir,
+    process::tracking::ProcessTrackingConfig,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use crossterm::{
@@ -20,6 +21,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
 };
+#[cfg(windows)]
+use serde::Deserialize;
+#[cfg(windows)]
+use std::process::Command;
 use std::{
     ffi::OsString,
     fs,
@@ -40,6 +45,7 @@ enum Field {
     Env,
     SaveSession,
     HttpsInspection,
+    OnlyHttp1,
     ExtraCaEnv,
     Redact,
     ShowSecrets,
@@ -52,18 +58,14 @@ enum Field {
     RemoveCa,
 }
 
-const PROGRAM_FIELDS: &[Field] = &[
-    Field::Target,
-    Field::Arguments,
-    Field::Workdir,
-    Field::Start,
-];
+const PROGRAM_FIELDS: &[Field] = &[Field::Target, Field::Arguments, Field::Workdir];
 const RUN_FIELDS: &[Field] = &[
     Field::Listen,
     Field::MaxBody,
     Field::Env,
     Field::SaveSession,
     Field::HttpsInspection,
+    Field::OnlyHttp1,
     Field::ExtraCaEnv,
     Field::Redact,
     Field::ShowSecrets,
@@ -77,17 +79,32 @@ const CA_FIELDS: &[Field] = &[
     Field::CaFingerprint,
     Field::RemoveCa,
 ];
-const FIELD_COLUMNS: &[&[Field]] = &[PROGRAM_FIELDS, RUN_FIELDS, CA_FIELDS];
+const START_FIELDS: &[Field] = &[Field::Start];
+const FIELD_ROWS: &[&[Field]] = &[
+    &[Field::Target],
+    &[Field::Arguments],
+    &[Field::Workdir],
+    &[Field::Listen, Field::CaDir],
+    &[Field::MaxBody, Field::CaStatus],
+    &[Field::Env, Field::CreateCa],
+    &[Field::SaveSession, Field::InstallCaTrust],
+    &[Field::HttpsInspection, Field::CaPath],
+    &[Field::OnlyHttp1, Field::CaFingerprint],
+    &[Field::ExtraCaEnv, Field::RemoveCa],
+    &[Field::Redact],
+    &[Field::ShowSecrets],
+    &[Field::Start],
+];
 const FIELDS: &[Field] = &[
     Field::Target,
     Field::Arguments,
     Field::Workdir,
-    Field::Start,
     Field::Listen,
     Field::MaxBody,
     Field::Env,
     Field::SaveSession,
     Field::HttpsInspection,
+    Field::OnlyHttp1,
     Field::ExtraCaEnv,
     Field::Redact,
     Field::ShowSecrets,
@@ -98,12 +115,19 @@ const FIELDS: &[Field] = &[
     Field::CaPath,
     Field::CaFingerprint,
     Field::RemoveCa,
+    Field::Start,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LauncherScreen {
     Form,
-    ExeSelect,
+    LaunchSelect,
+}
+
+#[derive(Debug, Clone)]
+struct LaunchOption {
+    path: PathBuf,
+    kind: &'static str,
 }
 
 #[derive(Debug)]
@@ -121,13 +145,15 @@ struct LauncherState {
     env: String,
     save_session: String,
     https_inspection: bool,
+    only_http1: bool,
     extra_ca_env: bool,
     redact: bool,
     show_secrets: bool,
     ca_trust_status: String,
     confirm_remove_ca: bool,
-    exe_options: Vec<PathBuf>,
-    exe_selected: usize,
+    launch_options: Vec<LaunchOption>,
+    launch_selected: usize,
+    launch_filter: String,
     message: String,
 }
 
@@ -147,13 +173,15 @@ impl Default for LauncherState {
             env: String::new(),
             save_session: String::new(),
             https_inspection: false,
+            only_http1: false,
             extra_ca_env: true,
             redact: true,
             show_secrets: false,
             ca_trust_status: "not checked".to_string(),
             confirm_remove_ca: false,
-            exe_options: Vec::new(),
-            exe_selected: 0,
+            launch_options: Vec::new(),
+            launch_selected: 0,
+            launch_filter: String::new(),
             message: "Choose a program, tune launch settings, then start.".to_string(),
         }
     }
@@ -165,7 +193,16 @@ pub fn prompt_run_args() -> Result<RunArgs> {
     run_launcher_tui()
 }
 
-pub fn resolve_command_target(mut command: Vec<OsString>) -> Result<Vec<OsString>> {
+#[derive(Debug, Clone)]
+pub struct ResolvedCommandTarget {
+    pub command: Vec<OsString>,
+    pub process_tracking: ProcessTrackingConfig,
+}
+
+pub fn resolve_command_target(
+    mut command: Vec<OsString>,
+    mut process_tracking: ProcessTrackingConfig,
+) -> Result<ResolvedCommandTarget> {
     let Some(first) = command.first() else {
         bail!("child process not specified");
     };
@@ -173,13 +210,21 @@ pub fn resolve_command_target(mut command: Vec<OsString>) -> Result<Vec<OsString
     if path.is_dir() {
         if !io::stdin().is_terminal() {
             bail!(
-                "program path points to a folder; run TLScope in a terminal to choose an .exe, or pass the .exe path directly"
+                "program path points to a folder; run TLScope in a terminal to choose a launch file, or pass the file path directly"
             );
         }
-        let selected = choose_executable_tui(&path)?;
+        let selected = choose_launch_target_tui(&path)?;
         command[0] = selected.into_os_string();
     }
-    Ok(command)
+    let resolved = resolve_shortcut_command(command)?;
+    command = resolved.command;
+    if process_tracking.is_empty() {
+        process_tracking = resolved.process_tracking;
+    }
+    Ok(ResolvedCommandTarget {
+        command,
+        process_tracking,
+    })
 }
 
 fn run_launcher_tui() -> Result<RunArgs> {
@@ -248,7 +293,7 @@ fn draw_launcher(frame: &mut Frame<'_>, state: &LauncherState) {
 
     match state.screen {
         LauncherScreen::Form => draw_form(frame, chunks[1], state),
-        LauncherScreen::ExeSelect => draw_exe_select(frame, chunks[1], state),
+        LauncherScreen::LaunchSelect => draw_launch_select(frame, chunks[1], state),
     }
 
     let hint = match (state.screen, state.editing, state.confirm_remove_ca) {
@@ -258,10 +303,10 @@ fn draw_launcher(frame: &mut Frame<'_>, state: &LauncherState) {
         }
         (_, Some(_), _) => "Type value | Enter save | Esc cancel edit",
         (LauncherScreen::Form, None, _) => {
-            "Up/Down select | Left/Right column | Enter edit/toggle/action | Esc/q cancel"
+            "Up/Down select | Left/Right paired fields | Enter edit/toggle/action | Esc/q cancel"
         }
-        (LauncherScreen::ExeSelect, None, _) => {
-            "Up/Down select executable | Enter launch selected | Esc back"
+        (LauncherScreen::LaunchSelect, None, _) => {
+            "Type filter | Arrows select | Enter launch selected | Backspace edit | Esc back"
         }
     };
     let footer = Paragraph::new(vec![
@@ -273,18 +318,25 @@ fn draw_launcher(frame: &mut Frame<'_>, state: &LauncherState) {
 }
 
 fn draw_form(frame: &mut Frame<'_>, area: Rect, state: &LauncherState) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
+            Constraint::Length(5),
+            Constraint::Min(8),
+            Constraint::Length(3),
         ])
         .split(area);
 
-    draw_field_group(frame, columns[0], "Program", PROGRAM_FIELDS, state);
-    draw_field_group(frame, columns[1], "Launch settings", RUN_FIELDS, state);
-    draw_field_group(frame, columns[2], "Certificate", CA_FIELDS, state);
+    draw_field_group(frame, rows[0], "Program", PROGRAM_FIELDS, state);
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[1]);
+
+    draw_field_group(frame, columns[0], "Launch settings", RUN_FIELDS, state);
+    draw_field_group(frame, columns[1], "Certificate", CA_FIELDS, state);
+    draw_field_group(frame, rows[2], "Start", START_FIELDS, state);
 }
 
 fn draw_field_group(
@@ -326,40 +378,74 @@ fn field_line(state: &LauncherState, field: Field) -> Line<'static> {
     ])
 }
 
-fn draw_exe_select(frame: &mut Frame<'_>, area: Rect, state: &LauncherState) {
-    let lines = state
-        .exe_options
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            let selected = state.exe_selected == index;
-            let marker = if selected { "> " } else { "  " };
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
-            let style = if selected {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            Line::from(vec![
-                Span::styled(marker, style),
-                Span::styled(format!("{}. ", index + 1), style),
-                Span::raw(name),
-            ])
-        })
-        .collect::<Vec<_>>();
+fn draw_launch_select(frame: &mut Frame<'_>, area: Rect, state: &LauncherState) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(area);
+    let filter_text = if state.launch_filter.is_empty() {
+        "<type to filter>".to_string()
+    } else {
+        format!("{}_", state.launch_filter)
+    };
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Select executable from folder"),
-        ),
-        area,
+        Paragraph::new(Line::from(vec![
+            Span::styled("Name  ", Style::default().fg(Color::Cyan)),
+            Span::raw(filter_text),
+        ]))
+        .block(Block::default().borders(Borders::ALL).title("Search")),
+        rows[0],
     );
+
+    let filtered = filtered_launch_indices(state);
+    if filtered.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from("No launchable files match the filter."))
+                .block(Block::default().borders(Borders::ALL).title("Files")),
+            rows[1],
+        );
+        return;
+    }
+
+    let groups = launch_group_indices(state, &filtered);
+    let constraints = vec![Constraint::Ratio(1, groups.len() as u32); groups.len()];
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(rows[1]);
+
+    for (group, area) in groups.iter().zip(columns.iter()) {
+        let lines = group
+            .indices
+            .iter()
+            .map(|filtered_index| {
+                let option_index = filtered[*filtered_index];
+                let option = &state.launch_options[option_index];
+                let selected = state.launch_selected == *filtered_index;
+                let marker = if selected { "> " } else { "  " };
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled(format!("{}. ", filtered_index + 1), style),
+                    Span::raw(launch_option_name(option)),
+                ])
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(launch_group_title(group.kind)),
+            ),
+            *area,
+        );
+    }
 }
 
 fn handle_launcher_key(state: &mut LauncherState, key: KeyEvent) -> Result<Option<RunArgs>> {
@@ -390,7 +476,7 @@ fn handle_launcher_key(state: &mut LauncherState, key: KeyEvent) -> Result<Optio
 
     match state.screen {
         LauncherScreen::Form => handle_form_key(state, key),
-        LauncherScreen::ExeSelect => handle_exe_select_key(state, key),
+        LauncherScreen::LaunchSelect => handle_launch_select_key(state, key),
     }
 }
 
@@ -421,31 +507,60 @@ fn handle_form_key(state: &mut LauncherState, key: KeyEvent) -> Result<Option<Ru
     }
 }
 
-fn handle_exe_select_key(state: &mut LauncherState, key: KeyEvent) -> Result<Option<RunArgs>> {
+fn handle_launch_select_key(state: &mut LauncherState, key: KeyEvent) -> Result<Option<RunArgs>> {
     match key.code {
-        KeyCode::Down | KeyCode::Char('j') => {
-            if state.exe_selected + 1 < state.exe_options.len() {
-                state.exe_selected += 1;
-                state.message.clear();
-            } else {
-                state.message = "Already at the last executable.".to_string();
-            }
+        KeyCode::Down => {
+            move_launch_selection_vertical(state, 1);
             Ok(None)
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if state.exe_selected > 0 {
-                state.exe_selected -= 1;
-                state.message.clear();
-            } else {
-                state.message = "Already at the first executable.".to_string();
-            }
+        KeyCode::Up => {
+            move_launch_selection_vertical(state, -1);
+            Ok(None)
+        }
+        KeyCode::Right => {
+            move_launch_selection_horizontal(state, 1);
+            Ok(None)
+        }
+        KeyCode::Left => {
+            move_launch_selection_horizontal(state, -1);
+            Ok(None)
+        }
+        KeyCode::Home => {
+            state.launch_selected = 0;
+            state.message.clear();
+            Ok(None)
+        }
+        KeyCode::End => {
+            let filtered = filtered_launch_indices(state);
+            state.launch_selected = filtered.len().saturating_sub(1);
+            state.message.clear();
+            Ok(None)
+        }
+        KeyCode::Backspace => {
+            state.launch_filter.pop();
+            clamp_launch_selection(state);
+            state.message = launch_filter_message(state);
+            Ok(None)
+        }
+        KeyCode::Delete => {
+            state.launch_filter.clear();
+            clamp_launch_selection(state);
+            state.message = launch_filter_message(state);
+            Ok(None)
+        }
+        KeyCode::Char(ch) => {
+            state.launch_filter.push(ch);
+            clamp_launch_selection(state);
+            state.message = launch_filter_message(state);
             Ok(None)
         }
         KeyCode::Enter => {
-            let Some(path) = state.exe_options.get(state.exe_selected).cloned() else {
-                state.message = "No executable selected.".to_string();
+            let filtered = filtered_launch_indices(state);
+            let Some(option_index) = filtered.get(state.launch_selected).copied() else {
+                state.message = "No launchable file selected.".to_string();
                 return Ok(None);
             };
+            let path = state.launch_options[option_index].path.clone();
             state.target = path.display().to_string();
             Ok(match build_run_args(state) {
                 Ok(args) => Some(args),
@@ -457,11 +572,11 @@ fn handle_exe_select_key(state: &mut LauncherState, key: KeyEvent) -> Result<Opt
         }
         KeyCode::Esc => {
             state.screen = LauncherScreen::Form;
-            state.message = "Executable selection cancelled.".to_string();
+            state.message = "Program selection cancelled.".to_string();
             Ok(None)
         }
         _ => {
-            state.message = "Choose an executable with Enter, or press Esc.".to_string();
+            state.message = "Choose a launchable file with Enter, or press Esc.".to_string();
             Ok(None)
         }
     }
@@ -474,6 +589,15 @@ fn activate_field(state: &mut LauncherState) -> Result<Option<RunArgs>> {
                 "HTTPS inspection enabled. Make sure the TLScope CA is trusted.".to_string()
             } else {
                 "HTTPS inspection disabled; CONNECT will be tunneled.".to_string()
+            };
+            Ok(None)
+        }
+        Field::OnlyHttp1 => {
+            state.only_http1 = !state.only_http1;
+            state.message = if state.only_http1 {
+                "HTTP/2 ALPN disabled; inspected HTTPS will stay on HTTP/1.1.".to_string()
+            } else {
+                "HTTP/2 ALPN enabled for inspected HTTPS.".to_string()
             };
             Ok(None)
         }
@@ -532,57 +656,56 @@ fn select_field(state: &mut LauncherState, field: Field) {
 }
 
 fn field_position(field: Field) -> (usize, usize) {
-    FIELD_COLUMNS
+    FIELD_ROWS
         .iter()
         .enumerate()
-        .find_map(|(column, fields)| {
+        .find_map(|(row, fields)| {
             fields
                 .iter()
                 .position(|candidate| *candidate == field)
-                .map(|row| (column, row))
+                .map(|column| (row, column))
         })
         .unwrap_or((0, 0))
 }
 
 fn move_selection_vertical(state: &mut LauncherState, direction: isize) {
     let field = selected_field(state);
-    let (column, row) = field_position(field);
-    let fields = FIELD_COLUMNS[column];
+    let (row, column) = field_position(field);
     let next = if direction < 0 {
         row.saturating_sub(1)
     } else {
-        (row + 1).min(fields.len().saturating_sub(1))
+        (row + 1).min(FIELD_ROWS.len().saturating_sub(1))
     };
     if next == row {
         state.message = if direction < 0 {
-            "Already at the first row in this column.".to_string()
+            "Already at the first row.".to_string()
         } else {
-            "Already at the last row in this column.".to_string()
+            "Already at the last row.".to_string()
         };
     } else {
-        select_field(state, fields[next]);
+        let fields = FIELD_ROWS[next];
+        select_field(state, fields[column.min(fields.len().saturating_sub(1))]);
     }
 }
 
 fn move_selection_horizontal(state: &mut LauncherState, direction: isize) {
     let field = selected_field(state);
-    let (column, row) = field_position(field);
+    let (row, column) = field_position(field);
+    let fields = FIELD_ROWS[row];
     let next_column = if direction < 0 {
         column.saturating_sub(1)
     } else {
-        (column + 1).min(FIELD_COLUMNS.len().saturating_sub(1))
+        (column + 1).min(fields.len().saturating_sub(1))
     };
     if next_column == column {
         state.message = if direction < 0 {
-            "Already at the left column.".to_string()
+            "No field to the left.".to_string()
         } else {
-            "Already at the right column.".to_string()
+            "No field to the right.".to_string()
         };
         return;
     }
-    let fields = FIELD_COLUMNS[next_column];
-    let next_row = row.min(fields.len().saturating_sub(1));
-    select_field(state, fields[next_row]);
+    select_field(state, fields[next_column]);
 }
 
 fn check_ca_status_from_launcher(state: &mut LauncherState) -> Result<Option<RunArgs>> {
@@ -764,22 +887,30 @@ fn start_from_form(state: &mut LauncherState) -> Result<Option<RunArgs>> {
         return Ok(None);
     }
     if target.is_dir() {
-        match list_executables(&target) {
-            Ok(exes) if exes.is_empty() => {
-                state.message = format!("No .exe files found in {}.", target.display());
+        match list_launch_options(&target) {
+            Ok(options) if options.is_empty() => {
+                state.message = format!(
+                    "No supported launch files ({}) found in {}.",
+                    supported_launch_formats_label(),
+                    target.display()
+                );
             }
-            Ok(exes) => {
-                state.exe_options = exes;
-                state.exe_selected = 0;
-                state.screen = LauncherScreen::ExeSelect;
-                state.message = "Folder selected. Choose which .exe to launch.".to_string();
+            Ok(options) => {
+                state.launch_options = options;
+                state.launch_selected = 0;
+                state.launch_filter.clear();
+                state.screen = LauncherScreen::LaunchSelect;
+                state.message = "Folder selected. Filter by name, then launch a file.".to_string();
             }
             Err(error) => state.message = error.to_string(),
         }
         return Ok(None);
     }
-    if !target.is_file() {
-        state.message = "Target must be an .exe file or a folder.".to_string();
+    if !is_launchable_file(&target) {
+        state.message = format!(
+            "Target must be a supported launch file ({}) or a folder.",
+            supported_launch_formats_label()
+        );
         return Ok(None);
     }
     Ok(match build_run_args(state) {
@@ -793,9 +924,14 @@ fn start_from_form(state: &mut LauncherState) -> Result<Option<RunArgs>> {
 
 fn build_run_args(state: &LauncherState) -> Result<RunArgs> {
     let target = normalize_path(&state.target);
-    if !target.is_file() {
-        bail!("target is not a file: {}", target.display());
+    if !is_launchable_file(&target) {
+        bail!(
+            "target is not a supported launch file ({}): {}",
+            supported_launch_formats_label(),
+            target.display()
+        );
     }
+    let resolved = resolve_launch_target(&target)?;
     let listen = state
         .listen
         .trim()
@@ -806,10 +942,12 @@ fn build_run_args(state: &LauncherState) -> Result<RunArgs> {
         .trim()
         .parse::<usize>()
         .with_context(|| format!("invalid max body size '{}'", state.max_body_size.trim()))?;
-    let command = build_command(&target, &state.arguments)?;
-    let default_workdir = target
-        .parent()
-        .map(Path::to_path_buf)
+    let command = build_resolved_command(&resolved, &state.arguments)?;
+    let default_workdir = resolved
+        .workdir
+        .clone()
+        .or_else(|| resolved.program.parent().map(Path::to_path_buf))
+        .or_else(|| target.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."));
     let workdir = if state.workdir.trim().is_empty() {
         Some(default_workdir)
@@ -821,6 +959,7 @@ fn build_run_args(state: &LauncherState) -> Result<RunArgs> {
         common: CommonProxyArgs {
             listen,
             no_tls_decryption: !state.https_inspection,
+            only_http1: state.only_http1,
             ca_dir: optional_path(&state.ca_dir),
             max_body_size,
             redact: state.redact,
@@ -833,34 +972,271 @@ fn build_run_args(state: &LauncherState) -> Result<RunArgs> {
         no_extra_ca_env: !state.extra_ca_env,
         tls_confirmed: state.https_inspection,
         command,
+        process_tracking: resolved.process_tracking,
     })
 }
 
-fn choose_executable_tui(folder: &Path) -> Result<PathBuf> {
+#[derive(Debug)]
+struct ResolvedLaunchTarget {
+    program: PathBuf,
+    arguments: Vec<OsString>,
+    workdir: Option<PathBuf>,
+    process_tracking: ProcessTrackingConfig,
+}
+
+fn resolve_launch_target(target: &Path) -> Result<ResolvedLaunchTarget> {
+    if is_shortcut_path(target) {
+        return resolve_shortcut_target(target);
+    }
+    Ok(ResolvedLaunchTarget {
+        program: target.to_path_buf(),
+        arguments: Vec::new(),
+        workdir: target.parent().map(Path::to_path_buf),
+        process_tracking: tracking_for_target_path(target),
+    })
+}
+
+fn resolve_shortcut_command(command: Vec<OsString>) -> Result<ResolvedCommandTarget> {
+    let Some(first) = command.first() else {
+        bail!("child process not specified");
+    };
+    let shortcut = PathBuf::from(first);
+    if !is_shortcut_path(&shortcut) {
+        return Ok(ResolvedCommandTarget {
+            process_tracking: ProcessTrackingConfig::for_command(&command),
+            command,
+        });
+    }
+    if !shortcut.is_file() {
+        bail!("shortcut is not a file: {}", shortcut.display());
+    }
+    let resolved = resolve_shortcut_target(&shortcut)?;
+    let mut resolved_command = vec![resolved.program.into_os_string()];
+    resolved_command.extend(resolved.arguments);
+    resolved_command.extend(command.into_iter().skip(1));
+    Ok(ResolvedCommandTarget {
+        command: resolved_command,
+        process_tracking: resolved.process_tracking,
+    })
+}
+
+fn build_resolved_command(
+    resolved: &ResolvedLaunchTarget,
+    user_args: &str,
+) -> Result<Vec<OsString>> {
+    let mut command = vec![resolved.program.as_os_str().to_os_string()];
+    command.extend(resolved.arguments.iter().cloned());
+    command.extend(split_args(user_args)?.into_iter().map(OsString::from));
+    Ok(command)
+}
+
+fn tracking_for_target_path(path: &Path) -> ProcessTrackingConfig {
+    let mut tracking = ProcessTrackingConfig::default();
+    tracking.add_target_path(path);
+    tracking
+}
+
+#[cfg(windows)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct WindowsShortcutTarget {
+    target_path: String,
+    arguments: Option<String>,
+    working_directory: Option<String>,
+}
+
+#[cfg(windows)]
+fn resolve_shortcut_target(shortcut: &Path) -> Result<ResolvedLaunchTarget> {
+    if is_url_shortcut_path(shortcut) {
+        return resolve_internet_shortcut_target(shortcut);
+    }
+
+    let shortcut_path = powershell_single_quoted_literal(&shortcut.display().to_string());
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$shortcutPath = {shortcut_path}
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+[pscustomobject]@{{
+    TargetPath = $shortcut.TargetPath
+    Arguments = $shortcut.Arguments
+    WorkingDirectory = $shortcut.WorkingDirectory
+}} | ConvertTo-Json -Compress
+"#
+    );
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(script)
+        .output()
+        .with_context(|| format!("cannot inspect shortcut {}", shortcut.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "cannot inspect shortcut {}: {}",
+            shortcut.display(),
+            stderr.trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let info: WindowsShortcutTarget = serde_json::from_str(stdout.trim())
+        .with_context(|| format!("cannot parse shortcut metadata for {}", shortcut.display()))?;
+    let program = PathBuf::from(info.target_path.trim());
+    if program.as_os_str().is_empty() {
+        bail!("shortcut has no target path: {}", shortcut.display());
+    }
+    let arguments = split_args(&info.arguments.unwrap_or_default())
+        .with_context(|| format!("cannot parse shortcut arguments for {}", shortcut.display()))?
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    Ok(ResolvedLaunchTarget {
+        program,
+        arguments,
+        workdir: non_empty_path(info.working_directory),
+        process_tracking: {
+            let mut tracking = tracking_for_target_path(Path::new(info.target_path.trim()));
+            tracking.add_process_names_from_path(shortcut);
+            tracking
+        },
+    })
+}
+
+#[cfg(windows)]
+fn resolve_internet_shortcut_target(shortcut: &Path) -> Result<ResolvedLaunchTarget> {
+    let contents = read_shortcut_text(shortcut)?;
+    let url = parse_internet_shortcut_url(&contents)
+        .ok_or_else(|| anyhow!("internet shortcut has no URL: {}", shortcut.display()))?;
+    Ok(ResolvedLaunchTarget {
+        program: PathBuf::from("rundll32.exe"),
+        arguments: vec![
+            OsString::from("url.dll,FileProtocolHandler"),
+            OsString::from(url),
+        ],
+        workdir: shortcut.parent().map(Path::to_path_buf),
+        process_tracking: {
+            let mut tracking = ProcessTrackingConfig::default();
+            tracking.add_process_names_from_path(shortcut);
+            if let Some(label) = shortcut
+                .file_stem()
+                .map(|name| name.to_string_lossy().into_owned())
+            {
+                tracking.set_label(label);
+            }
+            tracking
+        },
+    })
+}
+
+#[cfg(windows)]
+fn read_shortcut_text(path: &Path) -> Result<String> {
+    let bytes =
+        fs::read(path).with_context(|| format!("cannot read shortcut {}", path.display()))?;
+    if bytes.starts_with(&[0xff, 0xfe]) {
+        let words = bytes[2..]
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16(&words)
+            .with_context(|| format!("cannot decode UTF-16 shortcut {}", path.display()));
+    }
+    if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        return Ok(String::from_utf8_lossy(&bytes[3..]).into_owned());
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(windows)]
+fn parse_internet_shortcut_url(contents: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        let (key, value) = line.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case("URL")
+            .then(|| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+#[cfg(windows)]
+fn powershell_single_quoted_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(not(windows))]
+fn resolve_shortcut_target(shortcut: &Path) -> Result<ResolvedLaunchTarget> {
+    bail!(
+        "shortcuts are not supported on this platform: {}",
+        shortcut.display()
+    )
+}
+
+fn non_empty_path(value: Option<String>) -> Option<PathBuf> {
+    let value = value?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+fn is_shortcut_path(path: &Path) -> bool {
+    shortcut_extension_matches(path)
+}
+
+#[cfg(windows)]
+fn is_url_shortcut_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("url"))
+}
+
+#[cfg(windows)]
+fn shortcut_extension_matches(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("lnk") || extension.eq_ignore_ascii_case("url")
+    })
+}
+
+#[cfg(not(windows))]
+fn shortcut_extension_matches(_path: &Path) -> bool {
+    false
+}
+
+fn choose_launch_target_tui(folder: &Path) -> Result<PathBuf> {
     enable_raw_mode().context("cannot enable terminal raw mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).context("cannot enter alternate screen")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("cannot create executable selector")?;
-    let result = choose_executable_loop(&mut terminal, folder);
+    let result = choose_launch_target_loop(&mut terminal, folder);
     disable_raw_mode().ok();
     execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
     terminal.show_cursor().ok();
     result
 }
 
-fn choose_executable_loop(
+fn choose_launch_target_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     folder: &Path,
 ) -> Result<PathBuf> {
     let mut state = LauncherState {
-        screen: LauncherScreen::ExeSelect,
-        exe_options: list_executables(folder)?,
-        message: format!("Choose an .exe from {}.", folder.display()),
+        screen: LauncherScreen::LaunchSelect,
+        launch_options: list_launch_options(folder)?,
+        message: format!(
+            "Choose a launch file ({}) from {}.",
+            supported_launch_formats_label(),
+            folder.display()
+        ),
         ..LauncherState::default()
     };
-    if state.exe_options.is_empty() {
-        bail!("no .exe files found in {}", folder.display());
+    if state.launch_options.is_empty() {
+        bail!(
+            "no supported launch files ({}) found in {}",
+            supported_launch_formats_label(),
+            folder.display()
+        );
     }
     loop {
         terminal
@@ -876,46 +1252,260 @@ fn choose_executable_loop(
             continue;
         }
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => {
-                if state.exe_selected + 1 < state.exe_options.len() {
-                    state.exe_selected += 1;
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                state.exe_selected = state.exe_selected.saturating_sub(1);
-            }
             KeyCode::Enter => {
-                if let Some(path) = state.exe_options.get(state.exe_selected) {
-                    return Ok(path.clone());
+                let filtered = filtered_launch_indices(&state);
+                if let Some(option_index) = filtered.get(state.launch_selected).copied() {
+                    return Ok(state.launch_options[option_index].path.clone());
                 }
             }
-            KeyCode::Esc | KeyCode::Char('q') => bail!("launch cancelled"),
+            KeyCode::Esc => bail!("launch cancelled"),
+            KeyCode::Down => move_launch_selection_vertical(&mut state, 1),
+            KeyCode::Up => move_launch_selection_vertical(&mut state, -1),
+            KeyCode::Right => move_launch_selection_horizontal(&mut state, 1),
+            KeyCode::Left => move_launch_selection_horizontal(&mut state, -1),
+            KeyCode::Backspace => {
+                state.launch_filter.pop();
+                clamp_launch_selection(&mut state);
+                state.message = launch_filter_message(&state);
+            }
+            KeyCode::Delete => {
+                state.launch_filter.clear();
+                clamp_launch_selection(&mut state);
+                state.message = launch_filter_message(&state);
+            }
+            KeyCode::Char(ch) => {
+                state.launch_filter.push(ch);
+                clamp_launch_selection(&mut state);
+                state.message = launch_filter_message(&state);
+            }
             _ => state.message = "Choose with Enter, or cancel with Esc.".to_string(),
         }
     }
 }
 
-fn list_executables(folder: &Path) -> Result<Vec<PathBuf>> {
-    let mut executables = fs::read_dir(folder)
+fn list_launch_options(folder: &Path) -> Result<Vec<LaunchOption>> {
+    let mut options = fs::read_dir(folder)
         .with_context(|| format!("cannot read folder {}", folder.display()))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-        })
+        .filter_map(|path| launch_file_kind(&path).map(|kind| LaunchOption { path, kind }))
         .collect::<Vec<_>>();
-    executables.sort_by_key(|path| {
-        path.file_name()
-            .map(|name| name.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default()
+    options.sort_by_key(|option| {
+        (
+            launch_format_order(option.kind),
+            option
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default(),
+        )
     });
-    Ok(executables)
+    Ok(options)
+}
+
+#[derive(Debug)]
+struct LaunchGroupIndices {
+    kind: &'static str,
+    indices: Vec<usize>,
+}
+
+fn filtered_launch_indices(state: &LauncherState) -> Vec<usize> {
+    let needle = state.launch_filter.to_ascii_lowercase();
+    state
+        .launch_options
+        .iter()
+        .enumerate()
+        .filter(|(_, option)| {
+            needle.is_empty()
+                || launch_option_name(option)
+                    .to_ascii_lowercase()
+                    .contains(&needle)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn launch_group_indices(state: &LauncherState, filtered: &[usize]) -> Vec<LaunchGroupIndices> {
+    LAUNCH_FORMATS
+        .iter()
+        .filter_map(|kind| {
+            let indices = filtered
+                .iter()
+                .enumerate()
+                .filter_map(|(filtered_index, option_index)| {
+                    (state.launch_options[*option_index].kind == *kind).then_some(filtered_index)
+                })
+                .collect::<Vec<_>>();
+            (!indices.is_empty()).then_some(LaunchGroupIndices {
+                kind: *kind,
+                indices,
+            })
+        })
+        .collect()
+}
+
+fn clamp_launch_selection(state: &mut LauncherState) {
+    let filtered_len = filtered_launch_indices(state).len();
+    if filtered_len == 0 {
+        state.launch_selected = 0;
+    } else if state.launch_selected >= filtered_len {
+        state.launch_selected = filtered_len - 1;
+    }
+}
+
+fn launch_filter_message(state: &LauncherState) -> String {
+    let count = filtered_launch_indices(state).len();
+    if state.launch_filter.is_empty() {
+        format!("{count} launchable files.")
+    } else {
+        format!("{count} matches for '{}'.", state.launch_filter)
+    }
+}
+
+fn move_launch_selection_vertical(state: &mut LauncherState, direction: isize) {
+    let filtered = filtered_launch_indices(state);
+    if filtered.is_empty() {
+        state.message = "No launchable files match the filter.".to_string();
+        state.launch_selected = 0;
+        return;
+    }
+    let groups = launch_group_indices(state, &filtered);
+    let Some((group_index, row_index)) = launch_selection_position(&groups, state.launch_selected)
+    else {
+        state.launch_selected = 0;
+        return;
+    };
+    let group = &groups[group_index];
+    let next_row = if direction < 0 {
+        row_index.saturating_sub(1)
+    } else {
+        (row_index + 1).min(group.indices.len().saturating_sub(1))
+    };
+    if next_row == row_index {
+        state.message = if direction < 0 {
+            "Already at the first file in this column.".to_string()
+        } else {
+            "Already at the last file in this column.".to_string()
+        };
+    } else {
+        state.launch_selected = group.indices[next_row];
+        state.message.clear();
+    }
+}
+
+fn move_launch_selection_horizontal(state: &mut LauncherState, direction: isize) {
+    let filtered = filtered_launch_indices(state);
+    if filtered.is_empty() {
+        state.message = "No launchable files match the filter.".to_string();
+        state.launch_selected = 0;
+        return;
+    }
+    let groups = launch_group_indices(state, &filtered);
+    let Some((group_index, row_index)) = launch_selection_position(&groups, state.launch_selected)
+    else {
+        state.launch_selected = 0;
+        return;
+    };
+    let next_group = if direction < 0 {
+        group_index.saturating_sub(1)
+    } else {
+        (group_index + 1).min(groups.len().saturating_sub(1))
+    };
+    if next_group == group_index {
+        state.message = if direction < 0 {
+            "No file column to the left.".to_string()
+        } else {
+            "No file column to the right.".to_string()
+        };
+        return;
+    }
+    let target_group = &groups[next_group];
+    let target_row = row_index.min(target_group.indices.len().saturating_sub(1));
+    state.launch_selected = target_group.indices[target_row];
+    state.message.clear();
+}
+
+fn launch_selection_position(
+    groups: &[LaunchGroupIndices],
+    selected: usize,
+) -> Option<(usize, usize)> {
+    groups.iter().enumerate().find_map(|(group_index, group)| {
+        group
+            .indices
+            .iter()
+            .position(|index| *index == selected)
+            .map(|row_index| (group_index, row_index))
+    })
+}
+
+fn launch_option_name(option: &LaunchOption) -> String {
+    option
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| option.path.display().to_string())
+}
+
+fn launch_group_title(kind: &str) -> String {
+    if kind == "file" {
+        "files".to_string()
+    } else {
+        format!(".{kind}")
+    }
+}
+
+fn supported_launch_formats_label() -> String {
+    LAUNCH_FORMATS
+        .iter()
+        .map(|kind| launch_group_title(kind))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn launch_format_order(kind: &str) -> usize {
+    LAUNCH_FORMATS
+        .iter()
+        .position(|candidate| *candidate == kind)
+        .unwrap_or(usize::MAX)
+}
+
+#[cfg(windows)]
+const LAUNCH_FORMATS: &[&str] = &["exe", "lnk", "url"];
+
+#[cfg(not(windows))]
+const LAUNCH_FORMATS: &[&str] = &["file"];
+
+fn launch_file_kind(path: &Path) -> Option<&'static str> {
+    if !path.is_file() {
+        return None;
+    }
+    launch_kind_for_path(path)
+}
+
+#[cfg(windows)]
+fn launch_kind_for_path(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_string_lossy();
+    if extension.eq_ignore_ascii_case("exe") {
+        Some("exe")
+    } else if extension.eq_ignore_ascii_case("lnk") {
+        Some("lnk")
+    } else if extension.eq_ignore_ascii_case("url") {
+        Some("url")
+    } else {
+        None
+    }
+}
+
+#[cfg(not(windows))]
+fn launch_kind_for_path(_path: &Path) -> Option<&'static str> {
+    Some("file")
+}
+
+fn is_launchable_file(path: &Path) -> bool {
+    launch_file_kind(path).is_some()
 }
 fn field_label(field: Field) -> &'static str {
     match field {
-        Field::Target => "Program/folder",
+        Field::Target => "Program path",
         Field::Arguments => "Arguments",
         Field::Workdir => "Workdir",
         Field::Start => "Start",
@@ -924,6 +1514,7 @@ fn field_label(field: Field) -> &'static str {
         Field::Env => "Extra env",
         Field::SaveSession => "Save JSON",
         Field::HttpsInspection => "HTTPS inspect",
+        Field::OnlyHttp1 => "Only HTTP/1.1",
         Field::ExtraCaEnv => "CA env vars",
         Field::Redact => "Redact body",
         Field::ShowSecrets => "Show secrets",
@@ -942,7 +1533,7 @@ fn field_value(state: &LauncherState, field: Field) -> String {
         return format!("{}_", state.edit_buffer);
     }
     match field {
-        Field::Target => display_empty(&state.target, "path, Tab completes"),
+        Field::Target => display_empty(&state.target, "file/folder, Tab completes"),
         Field::Arguments => display_empty(&state.arguments, "optional"),
         Field::Workdir => display_empty(&state.workdir, "auto"),
         Field::Start => "Enter to launch".to_string(),
@@ -951,6 +1542,7 @@ fn field_value(state: &LauncherState, field: Field) -> String {
         Field::Env => display_empty(&state.env, "KEY=VALUE;KEY2=VALUE"),
         Field::SaveSession => display_empty(&state.save_session, "off"),
         Field::HttpsInspection => on_off(state.https_inspection),
+        Field::OnlyHttp1 => on_off(state.only_http1),
         Field::ExtraCaEnv => on_off(state.extra_ca_env),
         Field::Redact => on_off(state.redact),
         Field::ShowSecrets => on_off(state.show_secrets),
@@ -970,6 +1562,7 @@ fn field_value_style(state: &LauncherState, field: Field) -> Style {
     }
     match field {
         Field::HttpsInspection => toggle_style(state.https_inspection),
+        Field::OnlyHttp1 => toggle_style(state.only_http1),
         Field::ExtraCaEnv => toggle_style(state.extra_ca_env),
         Field::Redact => toggle_style(state.redact),
         Field::ShowSecrets => {
@@ -1020,6 +1613,7 @@ fn editable_value(state: &LauncherState, field: Field) -> String {
         Field::Env => state.env.clone(),
         Field::SaveSession => state.save_session.clone(),
         Field::HttpsInspection
+        | Field::OnlyHttp1
         | Field::ExtraCaEnv
         | Field::Redact
         | Field::ShowSecrets
@@ -1048,6 +1642,7 @@ fn apply_edit(state: &mut LauncherState, field: Field) {
         Field::Env => state.env = value,
         Field::SaveSession => state.save_session = value,
         Field::HttpsInspection
+        | Field::OnlyHttp1
         | Field::ExtraCaEnv
         | Field::Redact
         | Field::ShowSecrets
@@ -1211,21 +1806,8 @@ fn completion_candidate_allowed(path: &Path, mode: CompletionMode) -> bool {
     match mode {
         CompletionMode::Any => true,
         CompletionMode::Directory => path.is_dir(),
-        CompletionMode::ExecutableOrDir => path.is_dir() || is_program_file(path),
+        CompletionMode::ExecutableOrDir => path.is_dir() || is_launchable_file(path),
     }
-}
-
-#[cfg(windows)]
-fn is_program_file(path: &Path) -> bool {
-    path.is_file()
-        && path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-}
-
-#[cfg(not(windows))]
-fn is_program_file(path: &Path) -> bool {
-    path.is_file()
 }
 
 fn format_path_for_edit(path: &Path, append_separator: bool, force_quote: bool) -> String {
@@ -1275,12 +1857,6 @@ fn on_off(value: bool) -> String {
     } else {
         "OFF".to_string()
     }
-}
-
-fn build_command(target: &Path, args_line: &str) -> Result<Vec<OsString>> {
-    let mut command = vec![target.as_os_str().to_os_string()];
-    command.extend(split_args(args_line)?.into_iter().map(OsString::from));
-    Ok(command)
 }
 
 fn split_args(input: &str) -> Result<Vec<String>> {
@@ -1343,8 +1919,8 @@ fn normalize_path(input: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        ca_trust_value, complete_path_input, split_args, CompletionMode, CompletionOutcome,
-        LauncherState,
+        ca_trust_value, complete_path_input, filtered_launch_indices, list_launch_options,
+        split_args, CompletionMode, CompletionOutcome, LaunchOption, LauncherState, LAUNCH_FORMATS,
     };
     use std::fs;
 
@@ -1374,5 +1950,144 @@ mod tests {
             CompletionOutcome::Completed(value, _) => assert!(value.ends_with("DemoApp.exe")),
             other => panic!("unexpected completion result: {other:?}"),
         }
+    }
+
+    #[test]
+    fn filters_launch_options_by_name() {
+        let state = LauncherState {
+            launch_options: vec![
+                LaunchOption {
+                    path: "AlphaTool.exe".into(),
+                    kind: LAUNCH_FORMATS[0],
+                },
+                LaunchOption {
+                    path: "BetaTool.exe".into(),
+                    kind: LAUNCH_FORMATS[0],
+                },
+            ],
+            launch_filter: "alpha".to_string(),
+            ..LauncherState::default()
+        };
+
+        assert_eq!(filtered_launch_indices(&state), vec![0]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lists_windows_launch_files_by_supported_format() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("Beta.lnk"), b"").expect("write lnk");
+        fs::write(dir.path().join("Alpha.exe"), b"").expect("write exe");
+        fs::write(
+            dir.path().join("The Farmer Was Replaced.url"),
+            b"[InternetShortcut]\nURL=steam://rungameid/2060160\n",
+        )
+        .expect("write url");
+        fs::write(dir.path().join("notes.txt"), b"").expect("write ignored");
+
+        let options = list_launch_options(dir.path()).expect("list");
+        let names = options
+            .iter()
+            .map(|option| {
+                option
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        let kinds = options.iter().map(|option| option.kind).collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            ["Alpha.exe", "Beta.lnk", "The Farmer Was Replaced.url"]
+        );
+        assert_eq!(kinds, ["exe", "lnk", "url"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn completes_shortcut_path_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shortcut = dir.path().join("DemoShortcut.lnk");
+        fs::write(&shortcut, b"").expect("write lnk");
+        let prefix = dir.path().join("Demo").display().to_string();
+
+        let completed =
+            complete_path_input(&prefix, CompletionMode::ExecutableOrDir).expect("completion");
+
+        match completed {
+            CompletionOutcome::Completed(value, _) => assert!(value.ends_with("DemoShortcut.lnk")),
+            other => panic!("unexpected completion result: {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn completes_internet_shortcut_path_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shortcut = dir.path().join("DemoSteam.url");
+        fs::write(&shortcut, b"[InternetShortcut]\nURL=steam://rungameid/1\n").expect("write url");
+        let prefix = dir.path().join("Demo").display().to_string();
+
+        let completed =
+            complete_path_input(&prefix, CompletionMode::ExecutableOrDir).expect("completion");
+
+        match completed {
+            CompletionOutcome::Completed(value, _) => assert!(value.ends_with("DemoSteam.url")),
+            other => panic!("unexpected completion result: {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolves_internet_shortcut_to_protocol_handler() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shortcut = dir.path().join("SteamGame.url");
+        fs::write(
+            &shortcut,
+            b"[InternetShortcut]\nURL=steam://rungameid/2060160\n",
+        )
+        .expect("write url");
+
+        let resolved = super::resolve_internet_shortcut_target(&shortcut).expect("resolve");
+
+        assert_eq!(resolved.program, std::path::PathBuf::from("rundll32.exe"));
+        assert_eq!(
+            resolved.arguments,
+            [
+                std::ffi::OsString::from("url.dll,FileProtocolHandler"),
+                std::ffi::OsString::from("steam://rungameid/2060160")
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn internet_shortcut_tracking_uses_shortcut_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shortcut = dir.path().join("The Farmer Was Replaced.url");
+        fs::write(
+            &shortcut,
+            b"[InternetShortcut]\nURL=steam://rungameid/2060160\n",
+        )
+        .expect("write url");
+
+        let resolved = super::resolve_internet_shortcut_target(&shortcut).expect("resolve");
+
+        assert_eq!(
+            resolved.process_tracking.label(),
+            Some("The Farmer Was Replaced")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quotes_powershell_shortcut_paths() {
+        assert_eq!(
+            super::powershell_single_quoted_literal(r"C:\Apps\Bob's Tool.lnk"),
+            r"'C:\Apps\Bob''s Tool.lnk'"
+        );
     }
 }

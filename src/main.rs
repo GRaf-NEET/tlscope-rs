@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use tlscope::{app, cli::Cli, tui::logs::TlscopeLogLayer};
+use tlscope::{app, cli::Cli, diagnostics::logs::TlscopeLogLayer};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[tokio::main]

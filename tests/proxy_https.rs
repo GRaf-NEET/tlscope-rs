@@ -34,6 +34,7 @@ async fn inspects_https_connect_with_local_test_server() {
     let proxy = start_proxy(ProxyServerConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         tls_decryption: true,
+        only_http1: false,
         authority: Some(proxy_ca.clone()),
         max_body_size: 2048,
         store: store.clone(),
@@ -103,6 +104,7 @@ async fn inspects_http2_connect_with_local_test_server() {
     let proxy = start_proxy(ProxyServerConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         tls_decryption: true,
+        only_http1: false,
         authority: Some(proxy_ca.clone()),
         max_body_size: 2048,
         store: store.clone(),
@@ -180,6 +182,77 @@ async fn inspects_http2_connect_with_local_test_server() {
     proxy.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn only_http1_does_not_negotiate_h2_with_child_client() {
+    let upstream_ca_dir = tempfile::tempdir().unwrap();
+    let upstream_ca = LocalAuthority::load_or_create(upstream_ca_dir.path()).unwrap();
+    let upstream = start_tls_server(&upstream_ca).await;
+
+    let proxy_ca_dir = tempfile::tempdir().unwrap();
+    let proxy_ca = Arc::new(LocalAuthority::load_or_create(proxy_ca_dir.path()).unwrap());
+    let store = Arc::new(Mutex::new(TrafficStore::default()));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let proxy = start_proxy(ProxyServerConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        tls_decryption: true,
+        only_http1: true,
+        authority: Some(proxy_ca.clone()),
+        max_body_size: 2048,
+        store: store.clone(),
+        events: tx,
+        process_id: None,
+        upstream_roots: vec![ca_der_from_pem(upstream_ca.cert_pem()).unwrap()],
+    })
+    .await
+    .unwrap();
+
+    let mut tcp = TcpStream::connect(proxy.local_addr).await.unwrap();
+    let connect = format!(
+        "CONNECT localhost:{} HTTP/1.1\r\nHost: localhost:{}\r\n\r\n",
+        upstream.port(),
+        upstream.port()
+    );
+    tcp.write_all(connect.as_bytes()).await.unwrap();
+    let mut header = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !header.ends_with(b"\r\n\r\n") {
+        tcp.read_exact(&mut byte).await.unwrap();
+        header.push(byte[0]);
+    }
+    assert!(String::from_utf8_lossy(&header).contains("200"));
+
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(ca_der_from_pem(proxy_ca.cert_pem()).unwrap())
+        .unwrap();
+    let mut client_config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    let mut tls = TlsConnector::from(Arc::new(client_config))
+        .connect(server_name, tcp)
+        .await
+        .unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
+
+    tls.write_all(b"GET /secure HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    match tls.read_to_end(&mut response).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => {}
+        Err(error) => panic!("failed to read TLS response: {error}"),
+    }
+    assert!(String::from_utf8_lossy(&response).contains("secure-ok"));
+
+    wait_for_entries(&store, 1).await;
+    let entry = store.lock().unwrap().entries()[0].clone();
+    assert_eq!(entry.http_version, "HTTP/1.1");
+    assert_ne!(entry.tls.and_then(|tls| tls.alpn), Some("h2".to_string()));
+    proxy.shutdown().await.unwrap();
+}
 async fn start_tls_server(ca: &LocalAuthority) -> std::net::SocketAddr {
     let leaf = ca.leaf_for_host("localhost").unwrap();
     let config = rustls::ServerConfig::builder()

@@ -1,6 +1,7 @@
 use crate::{
     capture::redact::RedactionConfig,
     cli::{CommonProxyArgs, RunArgs},
+    process::tracking::ProcessTrackingConfig,
 };
 use anyhow::{anyhow, Context, Result};
 use std::{
@@ -13,6 +14,7 @@ use std::{
 pub struct AppConfig {
     pub listen: SocketAddr,
     pub tls_decryption: bool,
+    pub only_http1: bool,
     pub ca_dir: PathBuf,
     pub max_body_size: usize,
     pub redaction: RedactionConfig,
@@ -25,6 +27,7 @@ pub struct ChildConfig {
     pub workdir: Option<PathBuf>,
     pub env: Vec<(OsString, OsString)>,
     pub no_extra_ca_env: bool,
+    pub process_tracking: ProcessTrackingConfig,
 }
 
 impl AppConfig {
@@ -39,6 +42,7 @@ impl AppConfig {
         Ok(Self {
             listen: args.listen,
             tls_decryption: !args.no_tls_decryption,
+            only_http1: args.only_http1,
             ca_dir: args.ca_dir.clone().unwrap_or_else(default_ca_dir),
             max_body_size: args.max_body_size,
             redaction: RedactionConfig::new(args.redact, args.show_secrets),
@@ -55,6 +59,7 @@ impl ChildConfig {
             workdir: args.workdir.clone(),
             env,
             no_extra_ca_env: args.no_extra_ca_env,
+            process_tracking: args.process_tracking.clone(),
         })
     }
 }

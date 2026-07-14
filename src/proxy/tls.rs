@@ -32,12 +32,17 @@ pub fn ca_der_from_pem(pem: &str) -> Result<CertificateDer<'static>> {
 pub async fn accept_client_tls(
     stream: TcpStream,
     leaf: LeafCertificate,
+    only_http1: bool,
 ) -> Result<ServerTlsStream<TcpStream>> {
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(leaf.cert_chain, leaf.private_key)
         .context("cannot build local TLS server config")?;
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = if only_http1 {
+        vec![b"http/1.1".to_vec()]
+    } else {
+        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+    };
     TlsAcceptor::from(Arc::new(config))
         .accept(stream)
         .await

@@ -1,7 +1,6 @@
 use crate::{
-    capture::store::TrafficFilter,
-    process::logs::ChildLogStore,
-    tui::{filter::FilterEditorState, logs::TlscopeLogStore},
+    capture::store::TrafficFilter, diagnostics::logs::TlscopeLogStore,
+    process::logs::ChildLogStore, tui::filter::FilterEditorState,
 };
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
